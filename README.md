@@ -93,3 +93,7 @@ tests/                  pytest tests
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
+
+## License
+
+[MIT](LICENSE). Third-party libraries keep their own licenses (PySide6 and python-vlc/VLC are LGPL, Telethon is MIT, Google API clients are Apache 2.0).
