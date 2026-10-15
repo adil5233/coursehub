@@ -1,0 +1,8 @@
+PySide6>=6.8
+python-vlc>=3.0.20123
+requests>=2.31
+google-api-python-client>=2.100
+google-auth>=2.30
+google-auth-oauthlib>=1.2
+telethon>=1.36
+pytest>=8

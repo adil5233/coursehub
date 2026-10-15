@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.new
+
+# user data / secrets (normally in %APPDATA%\CourseHub)
+credentials.json
+token.json
+telegram.json
+*.session
+*.db
