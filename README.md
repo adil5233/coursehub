@@ -55,7 +55,7 @@ Click **+ Add Course**, give it a name and pick a source.
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Local folder | Choose the folder with the videos                                                                                                                                                                       |
 | Google Drive | A Google Cloud OAuth client (`credentials.json`, Desktop app type, Drive API enabled). The app asks for it on first use, then you sign in once in the browser. Paste a folder link or browse your Drive |
-| Telegram     | `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org), then log in with your phone number and code. Pick a channel, group, bot or chat (search box helps with many chats)           |
+| Telegram     | `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org), then log in with your phone number and code. Pick a channel, group, bot or chat (search box helps with many chats)             |
 
 > Telegram limits download speed for non-Premium accounts (about 0.5 MB/s in our tests), so a lecture that was never opened can take 20-30 seconds to start. Cached and prefetched lectures start much faster.
 
