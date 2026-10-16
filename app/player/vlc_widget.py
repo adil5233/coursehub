@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import SPEEDS, format_ms
+from ..ui.theme import ACCENT
 
 SEEK_STEP_MS = 10_000
 VOLUME_STEP = 5
@@ -229,6 +230,67 @@ class CountdownRing(QWidget):
         painter.drawText(QRectF(0, 0, side, side), Qt.AlignmentFlag.AlignCenter, str(self._seconds))
 
 
+class LoadingSpinner(QWidget):
+    """YouTube/Netflix-style spinner: a rotating arc whose head and tail chase each other."""
+
+    CYCLE_S = 1.3
+    TRAVEL_DEG = 280
+
+    def __init__(self, size: int = 72, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._percent: int | None = None
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self.update)
+        self.hide()
+
+    def set_percent(self, percent: int | None) -> None:
+        if percent != self._percent:
+            self._percent = percent
+            self.update()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._clock.start()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def paintEvent(self, event) -> None:
+        seconds = self._clock.elapsed() / 1000 if self._clock.isValid() else 0.0
+        cycle, phase = divmod(seconds / self.CYCLE_S, 1.0)
+        base = seconds * 120 + cycle * self.TRAVEL_DEG
+        tail = base + self.TRAVEL_DEG * phase * phase
+        head = base + self.TRAVEL_DEG * (1 - (1 - phase) ** 2) + 18
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        side = float(self.width())
+        pen_width = side * 0.075
+        circle = QRectF(pen_width, pen_width, side - 2 * pen_width, side - 2 * pen_width)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 110))
+        painter.drawEllipse(circle)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 45), pen_width))
+        painter.drawEllipse(circle)
+        painter.setPen(QPen(QColor(ACCENT), pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(circle, int(-tail * 16), int(-(head - tail) * 16))  # negative = clockwise
+        if self._percent is not None:
+            font = QFont()
+            font.setBold(True)
+            font.setPixelSize(int(side * 0.22))
+            painter.setFont(font)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(QRectF(0, 0, side, side), Qt.AlignmentFlag.AlignCenter, f"{self._percent}%")
+        painter.end()
+
+
 class UpNextCard(QFrame):
     """Netflix-style 'next video in 3, 2, 1' card shown over the video when a lecture ends."""
 
@@ -371,6 +433,7 @@ class PlayerOverlay(QWidget):
         self.status_label = QLabel()
         self.status_label.setObjectName("OverlayStatus")
         self.status_label.hide()
+        self.spinner = LoadingSpinner()
         self.bar = QWidget()
         self.bar.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)
         self.up_next = UpNextCard()
@@ -382,6 +445,8 @@ class PlayerOverlay(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addStretch(1)
+        layout.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(10)
         layout.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)
         layout.addLayout(up_next_row)
@@ -690,6 +755,8 @@ class VideoPlayer(QWidget):
         self._seek_target = None
         self._ended_early = False
         self.slider.set_buffered([])
+        self.overlay.spinner.set_percent(None)
+        self.overlay.spinner.show()
         self.cc_btn.hide()
         # ":start-paused" + ":start-time" freezes VLC 3, so start playing muted and pause once ready.
         self._player.audio_set_mute(self._muted or not autoplay)
@@ -707,6 +774,7 @@ class VideoPlayer(QWidget):
         self.slider.set_buffered([])
         self.status_label.clear()
         self.status_label.hide()
+        self.overlay.spinner.hide()
         self.cc_btn.hide()
         self._set_playing(False)
         self._update_time_label()
@@ -899,16 +967,15 @@ class VideoPlayer(QWidget):
         self._buffering = event.u.new_cache  # VLC thread: plain float store only
 
     def _update_status(self, state) -> None:
-        if state == vlc.State.Opening or (state == vlc.State.Buffering and not self._settled):
-            text = "Loading video..."
-            if 0 < self._buffering < 100:
-                text = f"Loading video... {self._buffering:.0f}%"
-        elif self._buffering < 100 and state in (vlc.State.Playing, vlc.State.Buffering):
-            text = f"Buffering {self._buffering:.0f}%"
-        elif state == vlc.State.Error:
-            text = "Playback error"
-        else:
-            text = ""
+        loading = state == vlc.State.Opening or (state == vlc.State.Buffering and not self._settled)
+        buffering = state in (vlc.State.Playing, vlc.State.Buffering) and (
+            self._buffering < 100 or self._seek_target is not None
+        )
+        if loading or buffering:
+            self.overlay.spinner.set_percent(int(self._buffering) if 0 < self._buffering < 100 else None)
+        if self.overlay.spinner.isVisible() != (loading or buffering):
+            self.overlay.spinner.setVisible(loading or buffering)
+        text = "Playback error" if state == vlc.State.Error else ""
         if self.status_label.text() != text:
             self.status_label.setText(text)
             self.status_label.setVisible(bool(text))
