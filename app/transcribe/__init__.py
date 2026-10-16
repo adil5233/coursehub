@@ -8,6 +8,7 @@ from ..config import TRANSCRIPTS_DIR
 MAX_LINE_S = 7.0  # Whisper segments run up to ~30 s; subtitles and the panel need short lines
 MAX_LINE_CHARS = 84
 SENTENCE_MIN_S = 2.5  # end a line at a full stop once it is at least this long
+SUBTITLE_LINE_CHARS = 42  # Netflix's limit per subtitle row
 
 
 @dataclass
@@ -79,9 +80,18 @@ def srt_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
 
 
+def subtitle_rows(text: str) -> str:
+    """Break a long line into two balanced rows at the space nearest the middle."""
+    if len(text) <= SUBTITLE_LINE_CHARS or " " not in text:
+        return text
+    middle = len(text) / 2
+    cut = min((i for i, char in enumerate(text) if char == " "), key=lambda i: abs(i - middle))
+    return f"{text[:cut]}\n{text[cut + 1:]}"
+
+
 def to_srt(segments: list[Segment]) -> str:
     blocks = [
-        f"{number}\n{srt_time(s.start)} --> {srt_time(s.end)}\n{s.text}\n"
+        f"{number}\n{srt_time(s.start)} --> {srt_time(s.end)}\n{subtitle_rows(s.text)}\n"
         for number, s in enumerate(segments, 1)
     ]
     return "\n".join(blocks)
@@ -137,6 +147,14 @@ def load_transcript(video_id: int) -> list[Segment] | None:
     if any(_is_long(s) for s in segments):  # made before lines were split: upgrade the files once
         save_transcript(video_id, segments)
         segments = split_segments(segments)
+    else:
+        srt = to_srt(segments)
+        try:
+            current = srt_path(video_id).read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current != srt:  # older subtitle layout (or missing file): rewrite it
+            srt_path(video_id).write_text(srt, encoding="utf-8")
     return segments
 
 

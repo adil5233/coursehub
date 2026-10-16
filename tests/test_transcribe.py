@@ -45,6 +45,15 @@ def test_srt_format():
     assert "2\n00:00:01,250 --> 00:00:03,000\nworld" in srt
 
 
+def test_long_subtitle_lines_become_two_balanced_rows():
+    from app.transcribe import subtitle_rows
+
+    assert subtitle_rows("short line") == "short line"
+    rows = subtitle_rows("Okay, first day complete beginners guys, you might get a bit overwhelmed because you")
+    assert rows == "Okay, first day complete beginners guys,\nyou might get a bit overwhelmed because you"
+    assert "\nyou might get" in to_srt([Segment(0, 5, rows.replace("\n", " "))])
+
+
 def test_merge_offsets_times_and_sorts_chunks():
     first = (0.0, [Segment(0, 5, "a"), Segment(598, 601, "b")])
     second = (600.0, [Segment(0.5, 1.5, "c"), Segment(1.5, 4, "d")])

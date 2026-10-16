@@ -107,6 +107,7 @@ class CourseView(QWidget):
         self._was_maximized = False
         self._notes_visible = db.get_state("notes_visible", "1") == "1"
         self._playlist_visible = db.get_state("playlist_visible", "1") == "1"
+        self._panel_was_visible = True  # side panel state before the Transcript button opened it
 
         # ---- top bar ----
         self.top_bar = QFrame()
@@ -166,8 +167,9 @@ class CourseView(QWidget):
         self.playlist_btn.setToolTip("Show / hide course content (T)")
         self.playlist_btn.toggled.connect(self.set_playlist_visible)
         self.transcript_btn = QPushButton("Transcript")
-        self.transcript_btn.setToolTip("Show the transcript of this lecture")
-        self.transcript_btn.clicked.connect(self.show_transcript)
+        self.transcript_btn.setCheckable(True)
+        self.transcript_btn.setToolTip("Show / hide the transcript of this lecture")
+        self.transcript_btn.toggled.connect(self.set_transcript_visible)
         for button in (self.prev_btn, self.next_btn, self.complete_btn, self.notes_btn, self.playlist_btn,
                        self.transcript_btn):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -265,7 +267,7 @@ class CourseView(QWidget):
             self.side_tabs.addButton(tab, index)
             tabs.addWidget(tab)
         tabs.addStretch(1)
-        self.side_tabs.idClicked.connect(self.side_stack.setCurrentIndex)
+        self.side_tabs.idClicked.connect(self._on_side_tab)
         self.side_tabs.button(0).setChecked(True)
 
         side_layout = QVBoxLayout(self.side_panel)
@@ -345,11 +347,37 @@ class CourseView(QWidget):
         self.playlist_btn.setChecked(visible)
         self.playlist_btn.blockSignals(False)
         self.db.set_state("playlist_visible", "1" if visible else "0")
+        self._sync_transcript_btn()
 
     def show_transcript(self) -> None:
-        self.set_playlist_visible(True)
-        self.side_tabs.button(1).setChecked(True)
-        self.side_stack.setCurrentIndex(1)
+        self.set_transcript_visible(True)
+
+    def set_transcript_visible(self, visible: bool) -> None:
+        """Toggle the Transcript tab; closing it restores the side panel as it was before."""
+        showing = self._playlist_visible and self.side_stack.currentIndex() == 1
+        if visible and not showing:
+            self._panel_was_visible = self._playlist_visible
+            self._select_side_tab(1)
+            self.set_playlist_visible(True)
+        elif not visible and showing:
+            self._select_side_tab(0)
+            if not self._panel_was_visible:
+                self.set_playlist_visible(False)
+        self._sync_transcript_btn()
+
+    def _select_side_tab(self, index: int) -> None:
+        self.side_tabs.button(index).setChecked(True)
+        self.side_stack.setCurrentIndex(index)
+
+    def _on_side_tab(self, index: int) -> None:
+        self.side_stack.setCurrentIndex(index)
+        self._panel_was_visible = True  # the user is using the panel itself now
+        self._sync_transcript_btn()
+
+    def _sync_transcript_btn(self) -> None:
+        self.transcript_btn.blockSignals(True)
+        self.transcript_btn.setChecked(self._playlist_visible and self.side_stack.currentIndex() == 1)
+        self.transcript_btn.blockSignals(False)
 
     # ---- transcripts ----
     def transcribe(self, video: Video | None, front: bool = False) -> None:

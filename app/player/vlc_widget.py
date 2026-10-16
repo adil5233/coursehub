@@ -8,7 +8,8 @@ from PySide6.QtCore import (
     QElapsedTimer, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QCursor, QFont, QIcon, QLinearGradient, QPainter, QPalette, QPen, QPixmap, QPolygonF,
+    QColor, QCursor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSlider, QStyle, QStyleOptionSlider, QVBoxLayout,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 from ..config import SPEEDS, format_ms
 from ..ui.theme import ACCENT
 from .preview import FramePreviewer, SeekPreviewCard
+from .subtitles import OVERLAY_FORMATS, CueTrack, parse_subtitles
 
 SEEK_STEP_MS = 10_000
 VOLUME_STEP = 5
@@ -26,6 +28,13 @@ END_SNAP_MS = 1500  # seeks this close to the end finish the video (VLC can't se
 SEEK_GRACE_S = 45  # how long to trust a seek target while a slow stream catches up
 NETWORK_CACHING_MS = 1500  # VLC's own buffer for streams; the proxy already reads ahead and caches
 DEFAULT_RATIO = 9 / 16
+VLC_ARGS = (
+    "--quiet", "--no-video-title-show", "--no-sub-autodetect-file",
+    # styled like the overlay subtitles, for formats VLC still renders itself (.ass, embedded tracks)
+    "--sub-text-scale=60", "--freetype-font=Arial", "--freetype-bold", "--sub-margin=30",
+)
+SUBTITLE_FONT = 0.042  # text height as a fraction of the video height (Netflix-like)
+SUBTITLE_BOTTOM = 0.045  # gap below the subtitles while the controls are hidden
 _QWIDGETSIZE_MAX = 16_777_215
 _SLIDER_MAX = 1000
 _ICON_COLOR = QColor("#f2f2f7")
@@ -506,6 +515,22 @@ class PlayerOverlay(QWidget):
         self._cursor_timer.timeout.connect(self._check_cursor)
         self._cursor_timer.start()
 
+        self._subtitle = ""
+        self._sub_lift = 1.0  # 0 = resting at the bottom, 1 = raised above the control bar
+        self._lift_animation = QVariantAnimation(self)
+        self._lift_animation.setDuration(200)
+        self._lift_animation.valueChanged.connect(self._set_lift)
+
+    def set_subtitle(self, text: str) -> None:
+        if text != self._subtitle:
+            self._subtitle = text
+            self.update()
+
+    def _set_lift(self, value) -> None:
+        self._sub_lift = float(value)
+        if self._subtitle:
+            self.update()
+
     def set_controls_visible(self, visible: bool) -> None:
         if visible == self._controls_visible:
             return
@@ -514,6 +539,10 @@ class PlayerOverlay(QWidget):
         if not visible:
             self.seek_preview.hide()
         self.setCursor(Qt.CursorShape.ArrowCursor if visible else Qt.CursorShape.BlankCursor)
+        self._lift_animation.stop()
+        self._lift_animation.setStartValue(self._sub_lift)
+        self._lift_animation.setEndValue(1.0 if visible else 0.0)
+        self._lift_animation.start()
         self.update()
 
     def _check_cursor(self) -> None:
@@ -546,6 +575,45 @@ class PlayerOverlay(QWidget):
             gradient.setColorAt(0, QColor(0, 0, 0, 0))
             gradient.setColorAt(1, QColor(0, 0, 0, 200))
             painter.fillRect(QRect(0, top, self.width(), self.height() - top), gradient)
+        if self._subtitle:
+            self._paint_subtitle(painter)
+
+    def _paint_subtitle(self, painter: QPainter) -> None:
+        """White bold text with a dark outline and soft shadow, centred near the bottom."""
+        font = QFont("Arial")
+        font.setBold(True)
+        font.setPixelSize(max(14, round(self.height() * SUBTITLE_FONT)))
+        metrics = QFontMetrics(font)
+        max_width = self.width() * 0.86
+        lines: list[str] = []
+        for paragraph in self._subtitle.split("\n"):
+            current = ""
+            for word in paragraph.split():
+                trial = f"{current} {word}".strip()
+                if current and metrics.horizontalAdvance(trial) > max_width:
+                    lines.append(current)
+                    current = word
+                else:
+                    current = trial
+            if current:
+                lines.append(current)
+
+        resting = max(10.0, self.height() * SUBTITLE_BOTTOM)
+        raised = max(resting, max(self.bar.height(), self.bar.sizeHint().height()) + 12.0)
+        bottom = self.height() - (resting + (raised - resting) * self._sub_lift)
+        line_height = metrics.height()
+        baseline = bottom - line_height * len(lines) + metrics.ascent()
+        outline = QPen(QColor(0, 0, 0, 220), max(2.0, font.pixelSize() / 8), Qt.PenStyle.SolidLine,
+                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        shadow_offset = max(1.0, font.pixelSize() / 16)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for line in lines:
+            path = QPainterPath()
+            path.addText((self.width() - metrics.horizontalAdvance(line)) / 2, baseline, font, line)
+            painter.fillPath(path.translated(shadow_offset, shadow_offset * 1.5), QColor(0, 0, 0, 150))
+            painter.strokePath(path, outline)
+            painter.fillPath(path, QColor(255, 255, 255))
+            baseline += line_height
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -581,7 +649,7 @@ class VideoPlayer(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._instance = vlc.Instance("--quiet", "--no-video-title-show", "--no-sub-autodetect-file")
+        self._instance = vlc.Instance(*VLC_ARGS)
         self._player = self._instance.media_player_new()
         self._media = None
         self._mrl: str | None = None
@@ -597,6 +665,8 @@ class VideoPlayer(QWidget):
         self._buffering = 100.0
         self._playing = False
         self._spu_track = -1
+        self._cues: CueTrack | None = None  # SRT/VTT drawn by the overlay instead of VLC
+        self._cues_on = True
         self._seek_target: int | None = None
         self._seek_deadline = 0.0
         self._ended_early = False
@@ -701,6 +771,10 @@ class VideoPlayer(QWidget):
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._poll)
         self._timer.start()
+        self._cue_timer = QTimer(self)
+        self._cue_timer.setInterval(100)
+        self._cue_timer.timeout.connect(self._update_cue)
+        self._cue_timer.start()
 
     def _button(self, icon: QIcon, tooltip: str, slot, size: int = 36, name: str = "OverlayButton") -> QPushButton:
         button = QPushButton()
@@ -812,7 +886,9 @@ class VideoPlayer(QWidget):
             media.add_option(f":network-caching={NETWORK_CACHING_MS}")
         if start_ms > 0:
             media.add_option(f":start-time={start_ms / 1000:.3f}")
-        if subtitle:
+        self._cues = None
+        self.overlay.set_subtitle("")
+        if subtitle and not self._use_overlay_subtitle(subtitle):
             media.slaves_add(vlc.MediaSlaveType.subtitle, 4, Path(subtitle).as_uri())
         self._media = media
         self._mrl, self._subtitle = mrl, subtitle
@@ -853,11 +929,14 @@ class VideoPlayer(QWidget):
         if self.previewer is not None:
             self.previewer.reset()
         self.cc_btn.hide()
+        self._cues = None
+        self.overlay.set_subtitle("")
         self._set_playing(False)
         self._update_time_label()
 
     def release(self) -> None:
         self._timer.stop()
+        self._cue_timer.stop()
         if self.previewer is not None:
             self.previewer.reset()
         self.overlay.close()
@@ -876,7 +955,26 @@ class VideoPlayer(QWidget):
         if self._mrl is None:
             return
         self._subtitle = path  # reloads (seek while opening, replay) keep it
-        self._player.add_slave(vlc.MediaSlaveType.subtitle, Path(path).as_uri(), True)
+        if not self._use_overlay_subtitle(path):
+            self._player.add_slave(vlc.MediaSlaveType.subtitle, Path(path).as_uri(), True)
+
+    def _use_overlay_subtitle(self, path: str) -> bool:
+        """SRT/VTT are drawn by the overlay (so they can move around the controls); others go to VLC."""
+        if Path(path).suffix.lower() not in OVERLAY_FORMATS:
+            return False
+        try:
+            self._cues = CueTrack(parse_subtitles(path))
+        except OSError:
+            return False
+        return True
+
+    def _update_cue(self) -> None:
+        text = ""
+        if self._cues is not None and self._cues_on and self._settled and self._seek_target is None:
+            position = self._player.get_time()
+            if position >= 0:
+                text = self._cues.text_at(position)
+        self.overlay.set_subtitle(text)
 
     def time(self) -> int:
         return self._last_time
@@ -994,6 +1092,10 @@ class VideoPlayer(QWidget):
         menu.exec(anchor - QPoint(0, menu.sizeHint().height() + 8))
 
     def _toggle_subtitles(self, enabled: bool) -> None:
+        if self._cues is not None:
+            self._cues_on = enabled
+            self._update_cue()
+            return
         if enabled:
             tracks = [track_id for track_id, _name in (self._player.video_get_spu_description() or []) if track_id >= 0]
             if tracks:
@@ -1032,10 +1134,11 @@ class VideoPlayer(QWidget):
         self._set_playing(playing if self._settled else self._want_playing)
         if self._settled:
             self._detect_ratio()
-            has_subtitles = self._player.video_get_spu_count() > 0
-            self.cc_btn.setVisible(has_subtitles)
+            has_vlc_subtitles = self._player.video_get_spu_count() > 0
+            self.cc_btn.setVisible(self._cues is not None or has_vlc_subtitles)
             self.cc_btn.blockSignals(True)
-            self.cc_btn.setChecked(has_subtitles and self._player.video_get_spu() >= 0)
+            self.cc_btn.setChecked(self._cues_on if self._cues is not None
+                                   else has_vlc_subtitles and self._player.video_get_spu() >= 0)
             self.cc_btn.blockSignals(False)
 
         length = self._player.get_length()
