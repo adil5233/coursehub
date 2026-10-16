@@ -57,12 +57,12 @@ class TelegramApiDialog(QDialog):
 class TelegramChannelDialog(QDialog):
     def __init__(self, channels: list[tuple[int, str]], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Choose Telegram channel")
+        self.setWindowTitle("Choose Telegram chat")
         self.resize(460, 520)
         self.selected: tuple[int, str] | None = None
 
         self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText("Search channels...")
+        self.filter_edit.setPlaceholderText("Search channels, groups, bots...")
         self.filter_edit.textChanged.connect(self._filter)
 
         self.list = QListWidget()

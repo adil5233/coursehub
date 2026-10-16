@@ -114,6 +114,10 @@ class TelegramService:
                 result.append((d.id, d.name))
             elif getattr(d.entity, "is_self", False):
                 result.append((d.id, "Saved Messages"))
+            elif getattr(d.entity, "bot", False):
+                result.append((d.id, f"{d.name} (bot)"))
+            elif d.is_user and not getattr(d.entity, "deleted", False):
+                result.append((d.id, d.name or "Unknown user"))
         return result
 
     def scan(self, chat_id: int) -> list[ScannedVideo]:
