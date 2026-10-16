@@ -73,3 +73,35 @@ def test_transcript_button_follows_tabs_and_playlist(app):
     view.set_playlist_visible(False)  # Playlist button hides the whole panel
     assert not view.transcript_btn.isChecked()
     view.player.release()
+
+
+def test_notes_panel_grows_with_its_notes(app):
+    from tests.test_notes_panel import FakeDb as NotesDb
+
+    view = make_view("1")
+    view.notes.db = NotesDb()
+    view.resize(1300, 900)
+    view.show()
+    view.notes.set_video(1)
+
+    def settle():
+        for _ in range(10):
+            app.processEvents()
+        return view.left_split.sizes()[1]
+
+    empty = settle()
+    view.notes.db.add_note(1, 0, "short note")
+    view.notes.set_video(1)
+    one = settle()
+    view.notes.db.add_note(1, 5000, "line\n" * 6)
+    view.notes.set_video(1)
+    two = settle()
+    assert empty < one < two  # the panel grows with each note
+    for i in range(30):
+        view.notes.db.add_note(1, i * 1000, "many notes")
+    view.notes.set_video(1)
+    capped = settle()
+    assert capped <= sum(view.left_split.sizes()) * 0.5 + 2  # never more than half: the rest scrolls
+    view.player.release()
+    view.close()
+

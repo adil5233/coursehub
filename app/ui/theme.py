@@ -40,6 +40,26 @@ QFrame#CourseCard {{ background: transparent; border-radius: 12px; }}
 QFrame#CourseCard:hover {{ background: {SURFACE}; }}
 QFrame#SidePanel {{ background: {SURFACE}; border-radius: 12px; }}
 QFrame#NotesPanel {{ background: {SURFACE}; border-radius: 12px; }}
+QPlainTextEdit#NoteInput {{ background: {BG}; border: 1px solid #303030; border-radius: 8px; padding: 2px 4px; }}
+QPlainTextEdit#NoteInput:focus {{ border: 1px solid #3ea6ff; }}
+QScrollArea#NotesScroll, QWidget#NotesList {{ background: transparent; }}
+QFrame#NoteCard {{ background: #2b2b2b; border-radius: 10px; }}
+QFrame#NoteCard:hover {{ background: #333333; }}
+QLabel#NoteText {{ background: transparent; color: {TEXT}; font-size: 13px; }}
+QPlainTextEdit#NoteCode {{ background: #0d0d0d; color: #e6e6e6; border: 1px solid #303030; border-radius: 8px;
+                           selection-background-color: #264f78;
+                           font-family: "Cascadia Mono", "Consolas", "Courier New", monospace; font-size: 13px; }}
+QPlainTextEdit#NoteCode QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 0 4px 2px 4px; }}
+QPlainTextEdit#NoteCode QScrollBar::handle:horizontal {{ background: #4a4a4a; border-radius: 4px; min-width: 30px; }}
+QPlainTextEdit#NoteCode QScrollBar::add-line:horizontal, QPlainTextEdit#NoteCode QScrollBar::sub-line:horizontal
+    {{ width: 0; }}
+QPushButton#NoteTime {{ background: rgba(62, 166, 255, 0.16); color: #3ea6ff; border-radius: 10px;
+                        padding: 2px 10px; font-weight: 700; }}
+QPushButton#NoteTime:hover {{ background: rgba(62, 166, 255, 0.3); }}
+QPushButton#NoteAction, QPushButton#NoteDelete {{ background: transparent; color: {MUTED}; border-radius: 10px;
+                                                  padding: 2px 10px; font-weight: 600; }}
+QPushButton#NoteAction:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; }}
+QPushButton#NoteDelete:hover {{ background: rgba(255, 0, 51, 0.18); color: #ff4d6a; }}
 QFrame#UpNext {{ background: {SURFACE}; border-radius: 12px; }}
 QFrame#TopBar {{ background: {BG}; border-bottom: 1px solid #272727; }}
 

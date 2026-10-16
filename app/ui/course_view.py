@@ -19,6 +19,7 @@ from .transcript_panel import TranscriptPanel
 from .utils import show_error
 
 VIDEO_ID = Qt.ItemDataRole.UserRole
+NOTES_MAX_SHARE = 0.5  # the notes panel never takes more than half of the left column
 COMPLETE_COLOR = "#2ba640"
 THUMB_W, THUMB_H = 120, 68
 _SCALE = 2  # draw at 2x so thumbnails stay sharp on high-DPI screens
@@ -204,6 +205,7 @@ class CourseView(QWidget):
         self.notes = NotesPanel(db, self.player.time)
         self.notes.seek_requested.connect(self.player.seek)
         self.notes.hide_requested.connect(lambda: self.set_notes_visible(False))
+        self.notes.content_height_changed.connect(self._fit_notes)
 
         self.left_split = QSplitter(Qt.Orientation.Vertical)
         self.left_split.setChildrenCollapsible(False)
@@ -339,6 +341,24 @@ class CourseView(QWidget):
         self.notes_btn.setChecked(visible)
         self.notes_btn.blockSignals(False)
         self.db.set_state("notes_visible", "1" if visible else "0")
+        if visible:
+            QTimer.singleShot(0, self._fit_notes)
+
+    def _fit_notes(self) -> None:
+        """Grow / shrink the notes panel to fit its notes; beyond NOTES_MAX_SHARE of the height it scrolls."""
+        if not self.notes.isVisible():
+            return
+        sizes = self.left_split.sizes()
+        total = sum(sizes)
+        if total <= 0:
+            return
+        target = max(self.notes.minimumHeight(), min(self.notes.preferred_height(), int(total * NOTES_MAX_SHARE)))
+        if abs(sizes[1] - target) > 2:
+            self.left_split.setSizes([total - target, target])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_notes)
 
     def set_playlist_visible(self, visible: bool) -> None:
         self._playlist_visible = visible
