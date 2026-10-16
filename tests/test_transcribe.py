@@ -6,6 +6,7 @@ import pytest
 av = pytest.importorskip("av")
 
 from app.transcribe import Segment, load_parts, merge_chunks, save_parts, srt_time, to_srt  # noqa: E402
+from app.transcribe import load_transcript, save_transcript, split_segments  # noqa: E402
 from app.transcribe import groq_client  # noqa: E402
 from app.transcribe.audio import iter_chunks  # noqa: E402
 
@@ -66,6 +67,41 @@ def test_parts_round_trip(tmp_path, monkeypatch):
     save_parts(7, {0: (0.0, [Segment(1, 2, "x")]), 1: (600.0, [])})
     assert load_parts(7) == {0: (0.0, [Segment(1, 2, "x")]), 1: (600.0, [])}
     assert load_parts(8) == {}
+
+
+def test_split_uses_word_times_and_sentence_ends():
+    text = "Aaj hum loops padhenge. Pehle for loop dekhte hain aur phir while loop ko samjhenge"
+    tokens = text.split()
+    words = [Segment(i * 1.0, i * 1.0 + 0.8, t.rstrip(".")) for i, t in enumerate(tokens)]
+    lines = split_segments([Segment(0, len(tokens), text)], words)
+    assert lines[0] == Segment(0, 3.8, "Aaj hum loops padhenge.")  # punctuation kept from the segment text
+    assert all(line.end - line.start <= 7 for line in lines)
+    assert " ".join(line.text for line in lines) == text
+    assert [line.start for line in lines] == sorted(line.start for line in lines)
+
+
+def test_split_without_word_times_estimates_and_keeps_short_lines():
+    short = Segment(0, 3, "chhoti line")
+    long = Segment(170, 210, " ".join(f"word{i}" for i in range(80)))
+    lines = split_segments([short, long])
+    assert lines[0] == short
+    assert len(lines) > 6 and lines[1].start == 170 and lines[-1].end == pytest.approx(210)
+    assert all(line.end - line.start <= 7.01 and len(line.text) <= 84 for line in lines[1:])
+
+
+def test_old_long_transcripts_are_split_on_load(tmp_path, monkeypatch):
+    import json
+
+    import app.transcribe as transcribe
+
+    monkeypatch.setattr(transcribe, "TRANSCRIPTS_DIR", tmp_path)
+    (tmp_path / "5.json").write_text(json.dumps([[170, 210, " ".join(["shabd"] * 60)]]), encoding="utf-8")
+    lines = load_transcript(5)
+    assert len(lines) > 4
+    assert len(json.loads((tmp_path / "5.json").read_text(encoding="utf-8"))) == len(lines)
+    assert (tmp_path / "5.srt").read_text(encoding="utf-8").count("-->") == len(lines)
+    save_transcript(6, [Segment(0, 2, "short")])
+    assert load_transcript(6) == [Segment(0, 2, "short")]
 
 
 def test_audio_chunks_overlap_and_offsets(tmp_path):

@@ -5,7 +5,7 @@ from datetime import date
 import requests
 
 from ..config import GROQ_CONFIG
-from . import Segment
+from . import Segment, split_segments
 
 API_URL = "https://api.groq.com/openai/v1"
 MODEL = "whisper-large-v3"
@@ -46,6 +46,7 @@ def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout:
             ("prompt", PROMPT),
             ("response_format", "verbose_json"),
             ("timestamp_granularities[]", "segment"),
+            ("timestamp_granularities[]", "word"),
             ("temperature", "0"),
         ],
         timeout=timeout,
@@ -61,10 +62,15 @@ def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout:
     if resp.status_code >= 400:
         raise GroqError(f"Groq error {resp.status_code}: {_error_message(resp)}")
     payload = resp.json()
-    return [
+    segments = [
         Segment(float(s["start"]), float(s["end"]), str(s.get("text", "")).strip())
         for s in payload.get("segments") or []
     ]
+    words = [
+        Segment(float(w["start"]), float(w["end"]), str(w.get("word", "")).strip())
+        for w in payload.get("words") or []
+    ]
+    return split_segments(segments, words)
 
 
 def check_key(api_key: str) -> None:

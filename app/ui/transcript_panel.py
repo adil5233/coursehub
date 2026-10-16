@@ -1,8 +1,9 @@
 from bisect import bisect_right
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QProgressBar, QPushButton,
     QStyledItemDelegate, QVBoxLayout,
 )
 
@@ -34,6 +35,7 @@ class TranscriptPanel(QFrame):
         super().__init__(parent)
         self.setObjectName("TranscriptPanel")
         self._starts: list[int] = []
+        self._segments: list[Segment] = []
         self._current_row = -1
 
         self.status = QLabel()
@@ -61,6 +63,17 @@ class TranscriptPanel(QFrame):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._filter)
 
+        self.copy_button = QPushButton("Copy")
+        self.copy_button.setToolTip("Copy the whole transcript")
+        self.copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        copy_menu = QMenu(self.copy_button)
+        copy_menu.addAction("Copy text", lambda: self._copy(timestamps=False))
+        copy_menu.addAction("Copy with timestamps", lambda: self._copy(timestamps=True))
+        self.copy_button.setMenu(copy_menu)
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search, 1)
+        search_row.addWidget(self.copy_button)
+
         self.list = QListWidget()
         self.list.setWordWrap(True)
         self.list.setTextElideMode(Qt.TextElideMode.ElideNone)
@@ -77,7 +90,7 @@ class TranscriptPanel(QFrame):
         layout.addWidget(self.status)
         layout.addLayout(buttons)
         layout.addWidget(self.progress)
-        layout.addWidget(self.search)
+        layout.addLayout(search_row)
         layout.addWidget(self.list, 1)
         layout.addStretch(0)  # keeps status + buttons at the top while the list is hidden
         self.show_idle("Select a lecture to see its transcript.", can_generate=False)
@@ -112,9 +125,11 @@ class TranscriptPanel(QFrame):
     def _set_segments(self, segments: list[Segment] | None) -> None:
         self.list.clear()
         self._starts = []
+        self._segments = list(segments or [])
         self._current_row = -1
         has_lines = bool(segments)
         self.search.setVisible(has_lines)
+        self.copy_button.setVisible(has_lines)
         self.list.setVisible(has_lines)
         for segment in segments or []:
             start_ms = int(segment.start * 1000)
@@ -124,6 +139,17 @@ class TranscriptPanel(QFrame):
             self._starts.append(start_ms)
         if self.search.text():
             self._filter(self.search.text())
+
+    # ---- copy ----
+    def transcript_text(self, timestamps: bool) -> str:
+        if timestamps:
+            return "\n".join(f"[{format_ms(int(s.start * 1000))}] {s.text}" for s in self._segments)
+        return " ".join(s.text for s in self._segments)
+
+    def _copy(self, timestamps: bool) -> None:
+        QGuiApplication.clipboard().setText(self.transcript_text(timestamps))
+        self.copy_button.setText("Copied \u2713")
+        QTimer.singleShot(1500, lambda: self.copy_button.setText("Copy"))
 
     # ---- playback sync ----
     def set_position(self, position_ms: int) -> None:

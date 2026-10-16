@@ -5,12 +5,70 @@ from pathlib import Path
 
 from ..config import TRANSCRIPTS_DIR
 
+MAX_LINE_S = 7.0  # Whisper segments run up to ~30 s; subtitles and the panel need short lines
+MAX_LINE_CHARS = 84
+SENTENCE_MIN_S = 2.5  # end a line at a full stop once it is at least this long
+
 
 @dataclass
 class Segment:
     start: float  # seconds
     end: float
     text: str
+
+
+def _join(words: list[Segment]) -> Segment:
+    return Segment(words[0].start, words[-1].end, " ".join(w.text.strip() for w in words if w.text.strip()))
+
+
+def group_words(words: list[Segment]) -> list[Segment]:
+    """Group timed words into short lines, preferring to break after a sentence ends."""
+    lines: list[Segment] = []
+    current: list[Segment] = []
+    for word in words:
+        if current:
+            chars = sum(len(w.text.strip()) + 1 for w in current) + len(word.text.strip())
+            too_long = word.end - current[0].start > MAX_LINE_S or chars > MAX_LINE_CHARS
+            sentence_end = (current[-1].text.rstrip().endswith((".", "?", "!"))
+                            and current[-1].end - current[0].start >= SENTENCE_MIN_S)
+            if too_long or sentence_end:
+                lines.append(_join(current))
+                current = []
+        current.append(word)
+    if current:
+        lines.append(_join(current))
+    return lines
+
+
+def _is_long(segment: Segment) -> bool:
+    return segment.end - segment.start > MAX_LINE_S or len(segment.text) > MAX_LINE_CHARS
+
+
+def _estimated_words(segment: Segment) -> list[Segment]:
+    """Word times spread over the segment by character position (when real word times are missing)."""
+    tokens = segment.text.split()
+    per_char = (segment.end - segment.start) / max(1, sum(len(t) + 1 for t in tokens))
+    words, position = [], 0
+    for token in tokens:
+        start = segment.start + position * per_char
+        position += len(token) + 1
+        words.append(Segment(start, segment.start + position * per_char, token))
+    return words
+
+
+def split_segments(segments: list[Segment], words: list[Segment] | None = None) -> list[Segment]:
+    """Break long segments into short lines, using Whisper's word timestamps when given."""
+    result: list[Segment] = []
+    for segment in segments:
+        if not _is_long(segment):
+            result.append(segment)
+            continue
+        inside = [w for w in words or [] if segment.start <= (w.start + w.end) / 2 < segment.end]
+        tokens = segment.text.split()
+        if inside and len(inside) == len(tokens):  # keep the segment's punctuation, use the word times
+            inside = [Segment(w.start, w.end, token) for w, token in zip(inside, tokens)]
+        result.extend(group_words(inside or _estimated_words(segment)))
+    return result
 
 
 def srt_time(seconds: float) -> str:
@@ -63,6 +121,7 @@ def has_transcript(video_id: int) -> bool:
 
 
 def save_transcript(video_id: int, segments: list[Segment]) -> None:
+    segments = split_segments(segments)
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     srt_path(video_id).write_text(to_srt(segments), encoding="utf-8")
     data = [[round(s.start, 2), round(s.end, 2), s.text] for s in segments]
@@ -74,7 +133,11 @@ def load_transcript(video_id: int) -> list[Segment] | None:
         data = json.loads(segments_path(video_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return [Segment(float(start), float(end), str(text)) for start, end, text in data]
+    segments = [Segment(float(start), float(end), str(text)) for start, end, text in data]
+    if any(_is_long(s) for s in segments):  # made before lines were split: upgrade the files once
+        save_transcript(video_id, segments)
+        segments = split_segments(segments)
+    return segments
 
 
 def load_parts(video_id: int) -> dict[int, tuple[float, list[Segment]]]:

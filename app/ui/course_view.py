@@ -500,7 +500,7 @@ class CourseView(QWidget):
             show_error(self, "Cannot play video", exc)
             return
         subtitle = self.services.subtitle_for(self.course, video)
-        if subtitle is None and has_transcript(video.id):
+        if subtitle is None and load_transcript(video.id) is not None:  # loading also upgrades old long-line files
             subtitle = str(srt_path(video.id))
         self.services.prefetch(self.course, video)
 
