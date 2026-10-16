@@ -11,7 +11,7 @@ from ..config import (
 from ..models import Course, Video
 from ..player.vlc_widget import SEEK_STEP_MS, VOLUME_STEP, VideoPlayer, glyph_icon
 from .notes_panel import NotesPanel
-from .remote import ensure_source
+from .remote import ensure_source, scan_source
 from .theme import ACCENT
 from .thumbnails import cover_pixmap, load_thumb
 from .utils import show_error
@@ -112,11 +112,15 @@ class CourseView(QWidget):
         self.progress_label = QLabel()
         self.progress_label.setObjectName("Muted")
         self.progress_bar = _thin_bar(160)
+        sync_button = QPushButton("Sync")
+        sync_button.setToolTip("Check the folder / Drive / Telegram chat for new or removed videos")
+        sync_button.clicked.connect(self.sync_course)
         top = QHBoxLayout(self.top_bar)
         top.setContentsMargins(12, 8, 20, 8)
         top.setSpacing(12)
         top.addWidget(back_button)
         top.addWidget(self.course_label, 1)
+        top.addWidget(sync_button)
         top.addWidget(self.progress_label)
         top.addWidget(self.progress_bar)
 
@@ -337,6 +341,37 @@ class CourseView(QWidget):
         self.db.set_state("speed", str(self.player.rate()))
         self.db.set_state("volume", str(self.player.volume()))
         self.player.release()
+
+    def sync_course(self) -> None:
+        """Rescan the source; progress is kept and the current video keeps playing."""
+        course = self.course
+        if course is None:
+            return
+        self.save_progress()
+        videos = scan_source(self, self.services, course.source, course.root)
+        if videos is None or self.course is not course:
+            return
+        if not videos:
+            QMessageBox.warning(self, "No videos", "No videos found, so the course was left unchanged.")
+            return
+        added, removed = self.db.sync_videos(course.id, videos)
+        self.videos = self.db.get_videos(course.id)
+        if self.current is not None:
+            current = self._video(self.current.id)
+            if current is None:  # the playing video was deleted at the source
+                self._cancel_up_next()
+                self.player.stop()
+            self.current = current
+        self._build_tree()
+        self._update_progress()
+        self._update_info()
+        if self.current is not None and (item := self._items.get(self.current.id)) is not None:
+            self.tree.setCurrentItem(item)
+            self.tree.scrollToItem(item)
+        if added:
+            start = self.videos.index(self.current) if self.current is not None else 0
+            self.thumbnails.request_course(course, self.videos, start)
+        QMessageBox.information(self, "Sync complete", f"{added} new video(s) added, {removed} removed.")
 
     def _pick_start_video(self) -> Video | None:
         by_id = {v.id: v for v in self.videos}

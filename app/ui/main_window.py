@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         open_action = menu.addAction("Open")
         rename_action = menu.addAction("Rename...")
-        rescan_action = menu.addAction("Refresh videos (rescan)")
+        rescan_action = menu.addAction("Sync videos (check for new)")
         reset_action = menu.addAction("Reset progress")
         menu.addSeparator()
         remove_action = menu.addAction("Remove course")
@@ -95,7 +95,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "No videos", "No videos found, so the course was left unchanged.")
                 return
             added, removed = self.db.sync_videos(course_id, videos)
-            QMessageBox.information(self, "Refresh complete", f"{added} new video(s) added, {removed} removed.")
+            QMessageBox.information(self, "Sync complete", f"{added} new video(s) added, {removed} removed.")
         elif chosen is reset_action:
             if QMessageBox.question(self, "Reset progress", f"Reset all progress for \"{course.name}\"?") \
                     == QMessageBox.StandardButton.Yes:
