@@ -4,8 +4,9 @@ A Udemy-style desktop app for Windows to watch video courses from your **local P
 
 ## Features
 
-- **Three sources:** a local folder, a Google Drive folder, or a Telegram channel/group.
+- **Three sources:** a local folder, a Google Drive folder, or a Telegram channel, group, bot or private chat.
   - Subfolders, or `#hashtags` for Telegram, become sections.
+  - **Sync** button rescans the source for new or removed videos; progress is kept.
 - **Progress tracking:**
   - Each lecture is marked complete when it finishes, and course progress is shown on the library card.
   - On restart the app reopens the same course and lecture at the same second.
@@ -13,13 +14,22 @@ A Udemy-style desktop app for Windows to watch video courses from your **local P
   - Subtitles (`.srt` / `.vtt` / `.ass`) next to a video are loaded automatically.
 - **YouTube-style player:**
   - Overlay controls that auto-hide.
-  - Click-to-seek, speed 0.5x–2x, volume/mute, theater mode and fullscreen.
+  - Speed 0.5x–2x, volume/mute, theater mode and fullscreen.
+  - Animated loading spinner while a video opens or buffers.
+- **YouTube-style seek bar:**
+  - Grows on hover, with a red scrubber and a lighter fill up to the hovered point.
+  - Hover anywhere to see a preview frame and the time.
+  - Shows which parts are already downloaded.
+  - Click anywhere, even while the video is still loading.
 - **Netflix-style "Up next":** a card appears 10 seconds before a lecture ends; press **Cancel** to stop the autoplay.
 - **Notes** per lecture, in a panel you can hide.
 - **Thumbnails** for courses and the playlist, cached on disk.
 - **Streaming with cache:**
   - Drive and Telegram videos stream through a local proxy and support seeking.
   - Telegram chunks are kept in a disk cache (up to 2 GB), which can be cleared from **Settings**.
+  - Downloads are prioritised: what the player needs now, then ~90 s of read-ahead, then background work.
+    Seeking cancels read-ahead that is no longer needed.
+  - The start of the next lecture is downloaded in the background, so it starts almost instantly.
 
 ## Requirements
 
@@ -45,7 +55,9 @@ Click **+ Add Course**, give it a name and pick a source.
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Local folder | Choose the folder with the videos                                                                                                                                                                       |
 | Google Drive | A Google Cloud OAuth client (`credentials.json`, Desktop app type, Drive API enabled). The app asks for it on first use, then you sign in once in the browser. Paste a folder link or browse your Drive |
-| Telegram     | `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org), then log in with your phone number and code. Pick a channel/group you have joined                                              |
+| Telegram     | `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org), then log in with your phone number and code. Pick a channel, group, bot or chat (search box helps with many chats)           |
+
+> Telegram limits download speed for non-Premium accounts (about 0.5 MB/s in our tests), so a lecture that was never opened can take 20-30 seconds to start. Cached and prefetched lectures start much faster.
 
 ## Keyboard shortcuts
 
@@ -71,6 +83,8 @@ Everything is kept in `%APPDATA%\CourseHub`:
 
 None of these are part of the repository. Keep the login files private.
 
+Only one CourseHub window can run at a time (two copies would fight over the Telegram login file).
+
 ## Project structure
 
 ```
@@ -83,7 +97,8 @@ app/
   scanner/              local / Drive / Telegram scanners
   drive/                Google Drive auth
   telegram/             Telethon client and chunk cache
-  player/vlc_widget.py  VLC player, overlay controls, Up next card
+  player/vlc_widget.py  VLC player, overlay controls, seek bar, Up next card
+  player/preview.py     seek bar hover previews
   ui/                   library, course view, dialogs, theme, thumbnails
 tests/                  pytest tests
 ```
