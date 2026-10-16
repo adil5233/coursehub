@@ -72,10 +72,9 @@ QPushButton#OverlayButton:checked {{ background: rgba(255, 255, 255, 0.25); }}
 QLabel#PlayerTime {{ color: {TEXT}; font-weight: 600; background: transparent; }}
 QLabel#OverlayStatus {{ background: rgba(0, 0, 0, 0.65); color: {TEXT}; border-radius: 10px; padding: 8px 18px;
                         font-size: 14px; font-weight: 600; }}
-QSlider#SeekSlider::groove:horizontal {{ height: 4px; background: rgba(255, 255, 255, 0.25); border-radius: 2px; }}
-QSlider#SeekSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
-QSlider#SeekSlider::handle:horizontal {{ background: {ACCENT}; width: 13px; height: 13px; margin: -5px 0;
-                                         border-radius: 6px; }}
+QFrame#SeekPreview {{ background: transparent; }}
+QLabel#SeekPreviewTime {{ background: rgba(0, 0, 0, 0.7); color: {TEXT}; border-radius: 10px; padding: 3px 12px;
+                          font-size: 13px; font-weight: 700; }}
 QSlider#VolumeSlider::groove:horizontal {{ height: 4px; background: rgba(255, 255, 255, 0.3); border-radius: 2px; }}
 QSlider#VolumeSlider::sub-page:horizontal {{ background: {TEXT}; border-radius: 2px; }}
 QSlider#VolumeSlider::handle:horizontal {{ background: {TEXT}; width: 12px; height: 12px; margin: -4px 0;

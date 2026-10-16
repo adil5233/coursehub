@@ -4,7 +4,9 @@ import time
 from pathlib import Path
 
 import vlc
-from PySide6.QtCore import QElapsedTimer, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QElapsedTimer, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal,
+)
 from PySide6.QtGui import (
     QColor, QCursor, QFont, QIcon, QLinearGradient, QPainter, QPalette, QPen, QPixmap, QPolygonF,
 )
@@ -15,12 +17,14 @@ from PySide6.QtWidgets import (
 
 from ..config import SPEEDS, format_ms
 from ..ui.theme import ACCENT
+from .preview import FramePreviewer, SeekPreviewCard
 
 SEEK_STEP_MS = 10_000
 VOLUME_STEP = 5
 CONTROLS_IDLE_S = 2.5
 END_SNAP_MS = 1500  # seeks this close to the end finish the video (VLC can't seek into the last moments)
-SEEK_GRACE_S = 15  # how long to trust a seek target while a slow stream catches up
+SEEK_GRACE_S = 45  # how long to trust a seek target while a slow stream catches up
+NETWORK_CACHING_MS = 1500  # VLC's own buffer for streams; the proxy already reads ahead and caches
 DEFAULT_RATIO = 9 / 16
 _QWIDGETSIZE_MAX = 16_777_215
 _SLIDER_MAX = 1000
@@ -115,16 +119,29 @@ class VideoFrame(QFrame):
 
 
 class SeekSlider(QSlider):
-    """Click anywhere to jump there, drag to scrub; always emits sliderPressed/Moved/Released.
+    """YouTube-style seek bar. Click anywhere to jump there, drag to scrub.
 
-    QSlider's own handling treats a click outside the handle (e.g. the very end) as a page step
-    and never emits sliderReleased, so the seek would silently not happen.
+    Always emits sliderPressed/Moved/Released: QSlider's own handling treats a click outside the handle
+    (e.g. the very end) as a page step and never emits sliderReleased, so the seek would not happen.
     """
+
+    hovered = Signal(float, int)  # fraction of the video under the cursor, cursor x
+    hover_left = Signal()
+    HEIGHT = 22  # hit area; the visible track is much thinner
+    MARGIN = 7  # room for the scrubber at both ends
+    TRACK, TRACK_HOVER, SCRUBBER = 4.0, 6.0, 7.0
 
     def __init__(self, orientation, parent=None) -> None:
         super().__init__(orientation, parent)
         self._scrubbing = False
         self._buffered: list[tuple[float, float]] = []
+        self._hover_fraction: float | None = None
+        self._grow = 0.0  # 0 = resting, 1 = hovered
+        self._grow_anim = QVariantAnimation(self)
+        self._grow_anim.setDuration(120)
+        self._grow_anim.valueChanged.connect(self._set_grow)
+        self.setMouseTracking(True)
+        self.setFixedHeight(self.HEIGHT)
 
     def set_buffered(self, ranges: list[tuple[float, float]]) -> None:
         """Already-downloaded parts of the video as (start, end) fractions, drawn lighter like YouTube."""
@@ -132,43 +149,56 @@ class SeekSlider(QSlider):
             self._buffered = ranges
             self.update()
 
+    def _set_grow(self, value) -> None:
+        self._grow = float(value)
+        self.update()
+
+    def _animate_grow(self, target: float) -> None:
+        self._grow_anim.stop()
+        self._grow_anim.setStartValue(self._grow)
+        self._grow_anim.setEndValue(target)
+        self._grow_anim.start()
+
+    def _span(self) -> float:
+        return max(1.0, self.width() - 2 * self.MARGIN)
+
+    def _fraction_at(self, x: float) -> float:
+        return max(0.0, min(1.0, (x - self.MARGIN) / self._span()))
+
+    def _value_at(self, x: float) -> int:
+        return self.minimum() + round(self._fraction_at(x) * (self.maximum() - self.minimum()))
+
     def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        if not self._buffered:
-            return
-        option = QStyleOptionSlider()
-        self.initStyleOption(option)
-        style = self.style()
-        groove = style.subControlRect(QStyle.ComplexControl.CC_Slider, option,
-                                      QStyle.SubControl.SC_SliderGroove, self)
-        handle = style.subControlRect(QStyle.ComplexControl.CC_Slider, option,
-                                      QStyle.SubControl.SC_SliderHandle, self)
-        span = max(1, groove.width() - handle.width())
-        left = groove.x() + handle.width() / 2
-        played_end = handle.right() + 1  # keep the red played part and the handle untouched
-        y = handle.center().y() + 0.5
+        left, span = float(self.MARGIN), self._span()
+        height = self.TRACK + (self.TRACK_HOVER - self.TRACK) * self._grow
+        top = self.height() / 2 - height / 2
+        played = (self.value() - self.minimum()) / max(1, self.maximum() - self.minimum())
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 90))
+
+        def bar(start: float, end: float, color: QColor) -> None:
+            if end - start > 0.001:
+                painter.setBrush(color)
+                painter.drawRoundedRect(QRectF(left + start * span, top, (end - start) * span, height),
+                                        height / 2, height / 2)
+
+        bar(0.0, 1.0, QColor(255, 255, 255, 60))
         for start, end in self._buffered:
-            x1 = max(left + start * span, played_end)
-            x2 = left + end * span
-            if x2 - x1 >= 1:
-                painter.drawRoundedRect(QRectF(x1, y - 2, x2 - x1, 4), 2, 2)
+            bar(start, end, QColor(255, 255, 255, 110))
+        if self._hover_fraction is not None:
+            bar(0.0, self._hover_fraction, QColor(255, 255, 255, 150))  # shows where a click would jump to
+        bar(0.0, played, QColor(ACCENT))
+        radius = self.SCRUBBER * (1.0 if self._scrubbing else self._grow)
+        if radius > 0.5:
+            painter.setBrush(QColor(ACCENT))
+            painter.drawEllipse(QPointF(left + played * span, self.height() / 2), radius, radius)
         painter.end()
 
-    def _value_at(self, x: float) -> int:
-        option = QStyleOptionSlider()
-        self.initStyleOption(option)
-        style = self.style()
-        groove = style.subControlRect(QStyle.ComplexControl.CC_Slider, option,
-                                      QStyle.SubControl.SC_SliderGroove, self)
-        handle = style.subControlRect(QStyle.ComplexControl.CC_Slider, option,
-                                      QStyle.SubControl.SC_SliderHandle, self)
-        span = max(1, groove.width() - handle.width())
-        offset = int(x - groove.x() - handle.width() / 2)
-        return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), max(0, min(span, offset)), span)
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        self._animate_grow(1.0)
 
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -181,16 +211,32 @@ class SeekSlider(QSlider):
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
+        x = event.position().x()
         if self._scrubbing:
-            self.setValue(self._value_at(event.position().x()))
+            self.setValue(self._value_at(x))
             self.sliderMoved.emit(self.value())
+        self._hover_fraction = self._fraction_at(x)
+        self.update()
+        self.hovered.emit(self._hover_fraction, int(x))
         event.accept()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        if not self._scrubbing:
+            self._end_hover()
+
+    def _end_hover(self) -> None:
+        self._hover_fraction = None
+        self._animate_grow(0.0)
+        self.hover_left.emit()
 
     def mouseReleaseEvent(self, event) -> None:
         if self._scrubbing and event.button() == Qt.MouseButton.LeftButton:
             self._scrubbing = False
             self.setValue(self._value_at(event.position().x()))
             self.sliderReleased.emit()
+            if not self.rect().contains(event.position().toPoint()):
+                self._end_hover()
         event.accept()
 
 
@@ -326,9 +372,11 @@ class UpNextCard(QFrame):
         play_button = QPushButton("\u25b6  Play now")
         play_button.setObjectName("Primary")
         play_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        play_button.setCursor(Qt.CursorShape.PointingHandCursor)
         play_button.clicked.connect(lambda: self._finish(self.play_now))
         cancel_button = QPushButton("Cancel")
         cancel_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_button.clicked.connect(lambda: self._finish(self.cancelled))
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
@@ -434,6 +482,7 @@ class PlayerOverlay(QWidget):
         self.status_label.setObjectName("OverlayStatus")
         self.status_label.hide()
         self.spinner = LoadingSpinner()
+        self.seek_preview = SeekPreviewCard(self)
         self.bar = QWidget()
         self.bar.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)
         self.up_next = UpNextCard()
@@ -462,6 +511,8 @@ class PlayerOverlay(QWidget):
             return
         self._controls_visible = visible
         self.bar.setVisible(visible)
+        if not visible:
+            self.seek_preview.hide()
         self.setCursor(Qt.CursorShape.ArrowCursor if visible else Qt.CursorShape.BlankCursor)
         self.update()
 
@@ -579,9 +630,23 @@ class VideoPlayer(QWidget):
         self.slider.setObjectName("SeekSlider")
         self.slider.setRange(0, _SLIDER_MAX)
         self.slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self.slider.sliderPressed.connect(self._on_slider_pressed)
         self.slider.sliderReleased.connect(self._on_slider_released)
         self.slider.sliderMoved.connect(self._on_slider_moved)
+        self.slider.hovered.connect(self._on_slider_hover)
+        self.slider.hover_left.connect(self._hide_preview)
+        self.seek_preview = self.overlay.seek_preview
+        self._preview_bucket: int | None = None
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(120)
+        self._preview_timer.timeout.connect(self._request_preview)
+        try:
+            self.previewer: FramePreviewer | None = FramePreviewer(self)
+            self.previewer.frame_ready.connect(self._on_preview_frame)
+        except Exception:
+            self.previewer = None  # Qt Multimedia unavailable: the preview shows only the time
 
         self.play_btn = self._button(self._icon_play, "Play / Pause (Space)", self.toggle_play, 44, "PlayCircle")
         self.mute_btn = self._button(self._icon_volume, "Mute (M)", self.toggle_mute)
@@ -592,6 +657,7 @@ class VideoPlayer(QWidget):
         self.volume_slider.setFixedWidth(80)
         self.volume_slider.setToolTip("Volume (Up / Down)")
         self.volume_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.volume_slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self.volume_slider.valueChanged.connect(self.set_volume)
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setObjectName("PlayerTime")
@@ -644,6 +710,7 @@ class VideoPlayer(QWidget):
         button.setFixedSize(size, size)
         button.setToolTip(tooltip)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.clicked.connect(slot)
         return button
 
@@ -735,19 +802,21 @@ class VideoPlayer(QWidget):
                 self._fit_frame()
 
     # ---- public API ----
-    def load(self, mrl: str, start_ms: int = 0, autoplay: bool = True, subtitle: str | None = None) -> None:
+    def load(self, mrl: str, start_ms: int = 0, autoplay: bool = True, subtitle: str | None = None,
+             length_hint: int = 0) -> None:
+        """length_hint (ms, e.g. from the library) lets the seek bar work before VLC has parsed the file."""
         self.overlay.up_next.stop()
         self._player.stop()
         media = self._instance.media_new(mrl) if "://" in mrl else self._instance.media_new_path(mrl)
         if "://" in mrl:
-            media.add_option(":network-caching=5000")
+            media.add_option(f":network-caching={NETWORK_CACHING_MS}")
         if start_ms > 0:
             media.add_option(f":start-time={start_ms / 1000:.3f}")
         if subtitle:
             media.slaves_add(vlc.MediaSlaveType.subtitle, 4, Path(subtitle).as_uri())
         self._media = media
         self._mrl, self._subtitle = mrl, subtitle
-        self._last_time, self._length = max(0, start_ms), 0
+        self._last_time, self._length = max(0, start_ms), max(0, length_hint)
         self._want_playing = autoplay
         self._settled = False
         self._buffering = 0.0
@@ -757,6 +826,11 @@ class VideoPlayer(QWidget):
         self.slider.set_buffered([])
         self.overlay.spinner.set_percent(None)
         self.overlay.spinner.show()
+        self._hide_preview()
+        self.seek_preview.clear_image()
+        if self.previewer is not None:
+            # Seek previews must not slow down playback, so the proxy serves them at background priority.
+            self.previewer.set_source(f"{mrl}?preview=1" if "/tg/" in mrl else mrl)
         self.cc_btn.hide()
         # ":start-paused" + ":start-time" freezes VLC 3, so start playing muted and pause once ready.
         self._player.audio_set_mute(self._muted or not autoplay)
@@ -775,12 +849,17 @@ class VideoPlayer(QWidget):
         self.status_label.clear()
         self.status_label.hide()
         self.overlay.spinner.hide()
+        self._hide_preview()
+        if self.previewer is not None:
+            self.previewer.reset()
         self.cc_btn.hide()
         self._set_playing(False)
         self._update_time_label()
 
     def release(self) -> None:
         self._timer.stop()
+        if self.previewer is not None:
+            self.previewer.reset()
         self.overlay.close()
         self._player.stop()
         self._player.release()
@@ -806,9 +885,9 @@ class VideoPlayer(QWidget):
             return
         state = self._player.get_state()
         if state == vlc.State.Ended or self._ended_early:
-            self.load(self._mrl, 0, True, self._subtitle)
+            self.load(self._mrl, 0, True, self._subtitle, self._length)
         elif state in (vlc.State.Stopped, vlc.State.Error):
-            self.load(self._mrl, self._last_time, True, self._subtitle)
+            self.load(self._mrl, self._last_time, True, self._subtitle, self._length)
         elif not self._settled:
             # Still opening: remember the intent and apply it once VLC is ready.
             self._want_playing = not self._want_playing
@@ -826,13 +905,19 @@ class VideoPlayer(QWidget):
             self._finish_early()
             return
         if self._player.get_state() in (vlc.State.Ended, vlc.State.Stopped, vlc.State.Error):
-            self.load(self._mrl, ms, True, self._subtitle)
+            self.load(self._mrl, ms, True, self._subtitle, self._length)
+        elif not self._settled:
+            # VLC ignores set_time while still opening; reopening at the new spot is one load instead of two.
+            self.load(self._mrl, ms, self._want_playing, self._subtitle, self._length)
         else:
-            self._player.set_time(ms)
-            self._seek_target = ms
-            self._seek_deadline = time.monotonic() + SEEK_GRACE_S
+            self._start_seek(ms)
         self._last_time = ms
         self._update_time_label()
+
+    def _start_seek(self, ms: int) -> None:
+        self._player.set_time(ms)
+        self._seek_target = ms
+        self._seek_deadline = time.monotonic() + SEEK_GRACE_S
 
     def _finish_early(self) -> None:
         """User jumped to the very end: behave as if the video played to its last frame."""
@@ -1000,6 +1085,40 @@ class VideoPlayer(QWidget):
     def _on_slider_moved(self, value: int) -> None:
         if self._length > 0:
             self.time_label.setText(f"{format_ms(value * self._length // _SLIDER_MAX)} / {format_ms(self._length)}")
+
+    # ---- seek preview ----
+    def _on_slider_hover(self, fraction: float, x: int) -> None:
+        if self._length <= 0:
+            return
+        ms = int(fraction * self._length)
+        step = max(2000, self._length // 200)
+        self._preview_bucket = ms // step * step
+        card = self.seek_preview
+        card.time.setText(format_ms(ms))
+        image = self.previewer.cached(self._preview_bucket) if self.previewer is not None else None
+        if image is not None:
+            card.set_image(image)
+        else:
+            self._preview_timer.start()  # debounce: only decode where the cursor rests
+        card.adjustSize()
+        anchor = self.slider.mapTo(self.overlay, QPoint(x, 0))
+        left = max(8, min(self.overlay.width() - card.width() - 8, anchor.x() - card.width() // 2))
+        card.move(left, anchor.y() - card.height() - 6)
+        if not card.isVisible():
+            card.show()
+        card.raise_()
+
+    def _request_preview(self) -> None:
+        if self.previewer is not None and self._preview_bucket is not None and self.seek_preview.isVisible():
+            self.previewer.request(self._preview_bucket)
+
+    def _on_preview_frame(self, bucket: int) -> None:
+        if bucket == self._preview_bucket and self.seek_preview.isVisible():
+            self.seek_preview.set_image(self.previewer.cached(bucket))
+
+    def _hide_preview(self) -> None:
+        self._preview_timer.stop()
+        self.seek_preview.hide()
 
     def _update_time_label(self) -> None:
         if not self._dragging:

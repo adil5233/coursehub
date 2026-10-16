@@ -97,6 +97,7 @@ class CourseView(QWidget):
         self._next_id: int | None = None
         self._up_next_early = False
         self._up_next_dismissed = False
+        self._next_prefetched = False
         self._was_maximized = False
         self._notes_visible = db.get_state("notes_visible", "1") == "1"
         self._playlist_visible = db.get_state("playlist_visible", "1") == "1"
@@ -398,6 +399,7 @@ class CourseView(QWidget):
         self.save_progress()
         self._cancel_up_next()
         self._up_next_dismissed = False
+        self._next_prefetched = False
         if not ensure_source(self, self.services, self.course.source):
             return
         try:
@@ -409,7 +411,7 @@ class CourseView(QWidget):
         self.services.prefetch(self.course, video)
 
         previous, self.current = self.current, video
-        self.player.load(mrl, video.last_position_ms, autoplay, subtitle)
+        self.player.load(mrl, video.last_position_ms, autoplay, subtitle, video.duration_ms)
         self.db.set_last_video(self.course.id, video.id)
         self.course.last_video_id = video.id
         self.notes.set_video(video.id)
@@ -445,6 +447,11 @@ class CourseView(QWidget):
         if not video.completed and position >= length - COMPLETE_TOLERANCE_MS:
             self._set_completed(video, True)
         self._update_early_up_next(position, length)
+        if not self._next_prefetched and (position >= length * 0.6 or length - position <= 120_000):
+            self._next_prefetched = True
+            following = self._neighbor(1)
+            if following is not None:
+                self.services.prefetch(self.course, following, upcoming=True)
 
     def _update_early_up_next(self, position: int, length: int) -> None:
         remaining = length - position

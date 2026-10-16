@@ -1,17 +1,41 @@
+import ctypes
 import os
 import sys
+from pathlib import Path
 
+from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.config import APP_NAME, DB_PATH, ensure_dirs
+from app.config import APP_NAME, DATA_DIR, DB_PATH, ensure_dirs
+
+AV_LOG_QUIET = -8
+
+
+def quiet_ffmpeg() -> None:
+    """Qt Multimedia's FFmpeg prints hardware-encoder probing ('could not find any MFT') to the console."""
+    import PySide6
+
+    for dll in Path(PySide6.__file__).parent.glob("avutil-*.dll"):
+        try:
+            ctypes.CDLL(str(dll)).av_log_set_level(AV_LOG_QUIET)
+        except (OSError, AttributeError):
+            pass
 
 
 def main() -> int:
     # Thumbnail grabbing uses Qt Multimedia, whose FFmpeg backend is very chatty on the console.
     os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia*=false")
+    quiet_ffmpeg()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     ensure_dirs()
+
+    # Two copies would fight over the Telegram session file ("database is locked").
+    lock = QLockFile(str(DATA_DIR / "coursehub.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(100):
+        QMessageBox.information(None, APP_NAME, "CourseHub is already running.")
+        return 0
 
     try:
         import vlc
@@ -43,6 +67,7 @@ def main() -> int:
     finally:
         services.shutdown()
         db.close()
+        lock.unlock()
 
 
 if __name__ == "__main__":

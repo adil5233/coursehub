@@ -10,6 +10,8 @@ from .config import CACHE_DIR, SUBTITLE_EXTENSIONS
 from .models import Course, Video
 from .stream_proxy import DRIVE_MEDIA_URL, SERVED_BLOCK, StreamProxy
 
+NEXT_LECTURE_HEAD_CHUNKS = 20  # Telegram chunks (~10 MB): long mp4s keep a 5-7 MB index at the start
+
 
 def folder_size(folder: Path) -> int:
     total = 0
@@ -99,18 +101,22 @@ class Services:
 
         return blocks_to_ranges(self.telegram.cached_chunks(int(course.root), int(video.ref)), CHUNK, video.size)
 
-    def prefetch(self, course: Course, video: Video) -> None:
-        """Start downloading the parts VLC needs first, without blocking the UI."""
+    def prefetch(self, course: Course, video: Video, upcoming: bool = False) -> None:
+        """Start downloading the parts VLC needs first, without blocking the UI.
+
+        upcoming=True is for the next lecture: more of its start, at background priority.
+        """
         if course.source != "telegram" or self.telegram is None or not self.telegram.is_authorized:
             return
         fraction = video.last_position_ms / video.duration_ms if video.duration_ms else 0.0
+        head, urgent = (NEXT_LECTURE_HEAD_CHUNKS, False) if upcoming else (1, True)
         threading.Thread(
-            target=self._safe_prefetch, args=(int(course.root), int(video.ref), fraction), daemon=True
+            target=self._safe_prefetch, args=(int(course.root), int(video.ref), fraction, head, urgent), daemon=True
         ).start()
 
-    def _safe_prefetch(self, chat_id: int, msg_id: int, fraction: float) -> None:
+    def _safe_prefetch(self, chat_id: int, msg_id: int, fraction: float, head: int, urgent: bool) -> None:
         try:
-            self.telegram.prefetch(chat_id, msg_id, fraction)
+            self.telegram.prefetch(chat_id, msg_id, fraction, head, urgent)
         except Exception:
             pass  # the real request will surface any error
 

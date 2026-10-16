@@ -1,3 +1,4 @@
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -5,7 +6,7 @@ import pytest
 import requests
 
 from app.stream_proxy import StreamProxy
-from app.telegram.client import CHUNK, TelegramService
+from app.telegram.client import AHEAD, CHUNK, IDLE, MAX_READ_AHEAD, MIN_READ_AHEAD, URGENT, TelegramService
 
 DATA = bytes(range(251)) * 12000  # ~3 MB, not a multiple of CHUNK
 
@@ -99,3 +100,110 @@ def test_proxy_ranges(tg):
         assert requests.get(url.replace(proxy.secret, "wrong"), timeout=30).status_code == 404
     finally:
         proxy.shutdown()
+
+
+def slow_downloads(service, seconds=0.3):
+    """Replace the network with a fixed delay and log (event, index, time)."""
+    service.log = []
+
+    async def download(msg, index):
+        service.log.append(("start", index, time.monotonic()))
+        await asyncio.sleep(seconds)
+        service.log.append(("end", index, time.monotonic()))
+        return DATA[index * CHUNK:(index + 1) * CHUNK]
+
+    service._download = download
+
+
+def started(service, index):
+    return next(t for event, i, t in service.log if event == "start" and i == index)
+
+
+def ended(service, index):
+    return next(t for event, i, t in service.log if event == "end" and i == index)
+
+
+def test_idle_work_waits_while_player_waits(tg):
+    slow_downloads(tg)
+    msg = tg.get_message(1, 2)
+    urgent = tg._chunk(1, 2, msg, 0, URGENT)
+    time.sleep(0.05)
+    idle = tg._chunk(1, 2, msg, 3, IDLE)
+    urgent.result(5)
+    idle.result(5)
+    assert started(tg, 3) >= ended(tg, 0)
+
+
+def test_read_ahead_runs_alongside_urgent(tg):
+    """VLC reads a file's start chunk by chunk; read-ahead must overlap or every chunk pays full latency."""
+    slow_downloads(tg)
+    msg = tg.get_message(1, 2)
+    urgent = tg._chunk(1, 2, msg, 0, URGENT)
+    time.sleep(0.05)
+    ahead = tg._chunk(1, 2, msg, 1, AHEAD)
+    urgent.result(5)
+    ahead.result(5)
+    assert started(tg, 1) < ended(tg, 0)
+
+
+def test_closing_a_stream_cancels_its_read_ahead(tg, monkeypatch):
+    import app.telegram.client as client
+
+    monkeypatch.setattr(client, "MAX_PARALLEL", 1)  # read-ahead queues up behind one download
+    slow_downloads(tg, seconds=0.3)
+    stream = tg.iter_range(1, 2, 0, len(DATA) - 1)
+    for _ in range(3):
+        next(stream)  # ramps read-ahead up to chunks 3..4
+    stream.close()  # what happens when VLC seeks away
+    time.sleep(1.5)
+    downloaded = {i for event, i, _ in tg.log if event == "start"}
+    assert 4 not in downloaded
+
+
+def test_new_stream_on_same_file_cancels_old_read_ahead(tg, monkeypatch):
+    import app.telegram.client as client
+
+    monkeypatch.setattr(client, "MAX_PARALLEL", 1)
+    slow_downloads(tg, seconds=0.3)
+    old = tg.iter_range(1, 2, 0, len(DATA) - 1)
+    for _ in range(3):
+        next(old)  # old stream now has read-ahead queued for chunks 3..4
+    new = tg.iter_range(1, 2, 5 * CHUNK, len(DATA) - 1)  # the player seeks near the end
+    assert next(new) == DATA[5 * CHUNK:6 * CHUNK]
+    time.sleep(1.0)
+    assert 4 not in {i for event, i, _ in tg.log if event == "start"}
+    old.close()
+    new.close()
+
+
+def test_urgent_request_promotes_queued_idle_chunk(tg):
+    slow_downloads(tg, seconds=1.0)
+    msg = tg.get_message(1, 2)
+    blocker = tg._chunk(1, 2, msg, 0, URGENT)
+    time.sleep(0.05)
+    queued = tg._chunk(1, 2, msg, 4, IDLE)  # waits behind the blocker
+    time.sleep(0.1)
+    assert tg._chunk(1, 2, msg, 4, URGENT) is queued
+    queued.result(5)
+    blocker.result(5)
+    assert started(tg, 4) < ended(tg, 0)
+
+
+def test_prefetch_fetches_head_and_tail(tg):
+    tg.prefetch(1, 2, 0.0, head_chunks=3, urgent=False)
+    deadline = time.monotonic() + 5
+    while len(tg.client.requests) < 4 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    last = (len(DATA) - 1) // CHUNK
+    assert sorted(tg.client.requests) == sorted({0, 1, 2, last})
+
+
+@pytest.mark.parametrize("size,duration,expected", [
+    (400 * 1024 ** 2, 9600, 8),  # low bitrate lecture: 90 s is ~3.8 MB
+    (1500 * 1024 ** 2, 3600, MAX_READ_AHEAD),
+    (10 * 1024 ** 2, 3600, MIN_READ_AHEAD),
+    (100 * 1024 ** 2, None, 8),
+])
+def test_read_ahead_follows_bitrate(size, duration, expected):
+    msg = SimpleNamespace(file=SimpleNamespace(size=size, duration=duration))
+    assert TelegramService._read_ahead_chunks(msg) == expected

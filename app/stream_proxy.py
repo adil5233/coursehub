@@ -85,7 +85,7 @@ class _Handler(BaseHTTPRequestHandler):
             if parts[1] == "drive" and len(parts) == 3 and _DRIVE_ID.match(parts[2]):
                 self._drive(parts[2], head)
             elif parts[1] == "tg" and len(parts) == 4:
-                self._telegram(int(parts[2]), int(parts[3]), head)
+                self._telegram(int(parts[2]), int(parts[3]), head, background=self.path.endswith("?preview=1"))
             else:
                 self.send_error(404)
         except ConnectionError:
@@ -133,7 +133,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.proxy.mark_served(file_id, position, len(chunk))
                 position += len(chunk)
 
-    def _telegram(self, chat_id: int, msg_id: int, head: bool) -> None:
+    def _telegram(self, chat_id: int, msg_id: int, head: bool, background: bool = False) -> None:
         tg = self.proxy.telegram
         if tg is None or not tg.is_authorized:
             self.send_error(503, "Telegram is not connected")
@@ -162,5 +162,5 @@ class _Handler(BaseHTTPRequestHandler):
         self._start(206 if partial else 200, headers)
         if head:
             return
-        for chunk in tg.iter_range(chat_id, msg_id, start, end):
+        for chunk in tg.iter_range(chat_id, msg_id, start, end, urgent=not background):
             self.wfile.write(chunk)

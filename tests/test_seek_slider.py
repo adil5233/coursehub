@@ -46,3 +46,11 @@ def test_drag_scrubs(slider):
     assert slider.value() > 700
     QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(600, 10))
     assert slider.events[-1][0] == "released"
+
+
+def test_hover_reports_fraction_without_seeking(slider):
+    hovers = []
+    slider.hovered.connect(lambda fraction, x: hovers.append((fraction, x)))
+    QTest.mouseMove(slider, QPoint(400, 10))
+    assert hovers and abs(hovers[-1][0] - 0.5) < 0.01 and hovers[-1][1] == 400
+    assert slider.value() == 0 and slider.events == []
