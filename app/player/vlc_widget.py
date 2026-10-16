@@ -868,6 +868,16 @@ class VideoPlayer(QWidget):
     def has_media(self) -> bool:
         return self._mrl is not None
 
+    def has_subtitle(self) -> bool:
+        return self._subtitle is not None
+
+    def add_subtitle(self, path: str) -> None:
+        """Attach a subtitle file to the playing video (e.g. a transcript that just finished) and show it."""
+        if self._mrl is None:
+            return
+        self._subtitle = path  # reloads (seek while opening, replay) keep it
+        self._player.add_slave(vlc.MediaSlaveType.subtitle, Path(path).as_uri(), True)
+
     def time(self) -> int:
         return self._last_time
 

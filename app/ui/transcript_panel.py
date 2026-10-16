@@ -1,0 +1,143 @@
+from bisect import bisect_right
+
+from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtWidgets import (
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
+    QStyledItemDelegate, QVBoxLayout,
+)
+
+from ..config import format_ms
+from ..transcribe import Segment
+
+START_MS = Qt.ItemDataRole.UserRole
+ITEM_PAD_X, ITEM_PAD_Y = 6, 8  # matches "QListWidget::item { padding }" in the theme
+
+
+class _WrapDelegate(QStyledItemDelegate):
+    """Row height for word-wrapped lines (Qt's own hint ignores the stylesheet padding and clips them)."""
+
+    def sizeHint(self, option, index) -> QSize:
+        width = max(80, self.parent().viewport().width() - 2 * ITEM_PAD_X - 4)
+        bounds = option.fontMetrics.boundingRect(QRect(0, 0, width, 100_000), Qt.TextFlag.TextWordWrap,
+                                                 str(index.data()))
+        return QSize(width, bounds.height() + 2 * ITEM_PAD_Y + 2)
+
+
+class TranscriptPanel(QFrame):
+    """YouTube-like transcript: timed lines, click to jump, search, current line highlighted."""
+
+    seek_requested = Signal(int)
+    generate_requested = Signal()
+    cancel_requested = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("TranscriptPanel")
+        self._starts: list[int] = []
+        self._current_row = -1
+
+        self.status = QLabel()
+        self.status.setObjectName("Muted")
+        self.status.setWordWrap(True)
+        self.generate_button = QPushButton("Generate transcript")
+        self.generate_button.setObjectName("Primary")
+        self.generate_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.generate_button.clicked.connect(lambda: self.generate_requested.emit())
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_button.clicked.connect(lambda: self.cancel_requested.emit())
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.generate_button)
+        buttons.addWidget(self.cancel_button)
+        buttons.addStretch(1)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(4)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search in transcript...")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._filter)
+
+        self.list = QListWidget()
+        self.list.setWordWrap(True)
+        self.list.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.list.setItemDelegate(_WrapDelegate(self.list))
+        self.list.setResizeMode(QListWidget.ResizeMode.Adjust)  # re-wrap lines when the panel is resized
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.list.itemClicked.connect(lambda item: self.seek_requested.emit(int(item.data(START_MS))))
+        self.list.setToolTip("Click a line to jump to that moment")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(self.status)
+        layout.addLayout(buttons)
+        layout.addWidget(self.progress)
+        layout.addWidget(self.search)
+        layout.addWidget(self.list, 1)
+        layout.addStretch(0)  # keeps status + buttons at the top while the list is hidden
+        self.show_idle("Select a lecture to see its transcript.", can_generate=False)
+
+    # ---- states ----
+    def show_idle(self, text: str, can_generate: bool = True) -> None:
+        self._set_segments(None)
+        self.status.setText(text)
+        self.generate_button.setVisible(can_generate)
+        self.cancel_button.hide()
+        self.progress.hide()
+
+    def show_progress(self, text: str, fraction: float) -> None:
+        self._set_segments(None)
+        self.status.setText(text)
+        self.generate_button.hide()
+        self.cancel_button.show()
+        self.progress.show()
+        if fraction < 0:
+            self.progress.setRange(0, 0)  # busy indicator
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(int(fraction * 100))
+
+    def show_segments(self, segments: list[Segment]) -> None:
+        self.status.setText(f"{len(segments)} lines  \u2022  click a line to jump there")
+        self.generate_button.hide()
+        self.cancel_button.hide()
+        self.progress.hide()
+        self._set_segments(segments)
+
+    def _set_segments(self, segments: list[Segment] | None) -> None:
+        self.list.clear()
+        self._starts = []
+        self._current_row = -1
+        has_lines = bool(segments)
+        self.search.setVisible(has_lines)
+        self.list.setVisible(has_lines)
+        for segment in segments or []:
+            start_ms = int(segment.start * 1000)
+            item = QListWidgetItem(f"{format_ms(start_ms)}    {segment.text}")
+            item.setData(START_MS, start_ms)
+            self.list.addItem(item)
+            self._starts.append(start_ms)
+        if self.search.text():
+            self._filter(self.search.text())
+
+    # ---- playback sync ----
+    def set_position(self, position_ms: int) -> None:
+        row = bisect_right(self._starts, position_ms) - 1
+        if row == self._current_row or row < 0:
+            return
+        self._current_row = row
+        item = self.list.item(row)
+        self.list.setCurrentItem(item)
+        if not self.list.underMouse() and not self.search.text():  # don't yank the list while the user reads
+            self.list.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
+
+    def _filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            item.setHidden(bool(needle) and needle not in item.text().lower())

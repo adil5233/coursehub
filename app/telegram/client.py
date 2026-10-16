@@ -171,18 +171,19 @@ class TelegramService:
         saved = self._run(self.client.download_media(msg, file=str(target), thumb=-1))
         return bool(saved) and Path(saved).is_file()
 
-    def iter_range(self, chat_id: int, msg_id: int, start: int, end: int, urgent: bool = True) -> Iterator[bytes]:
+    def iter_range(self, chat_id: int, msg_id: int, start: int, end: int, priority: int = URGENT) -> Iterator[bytes]:
         """Yield bytes start..end (inclusive) of the message's file, reading ahead in parallel.
 
-        urgent=False (e.g. seek previews) downloads at idle priority.
+        priority: URGENT for the player, AHEAD for bulk reads (transcripts), IDLE for seek previews.
         """
         msg = self.get_message(chat_id, msg_id)
         first, last = start // CHUNK, end // CHUNK
         window = self._read_ahead_chunks(msg)
+        ahead_priority = IDLE if priority == IDLE else AHEAD
         served = 0
         ahead_futures: dict[int, Future] = {}
         index = first
-        if urgent:
+        if priority == URGENT:
             with self._lock:
                 previous = self._streams.get((chat_id, msg_id))
                 self._streams[(chat_id, msg_id)] = ahead_futures
@@ -191,11 +192,11 @@ class TelegramService:
                 self._drop(chat_id, msg_id, previous, keep_from=None)
         try:
             for index in range(first, last + 1):
-                needed = self._chunk(chat_id, msg_id, msg, index, URGENT if urgent else IDLE)
+                needed = self._chunk(chat_id, msg_id, msg, index, priority)
                 # Read ahead only once VLC is clearly streaming sequentially, so header/seek probes stay cheap.
                 for ahead in range(index + 1, min(index + min(served, window), last) + 1):
                     if ahead not in ahead_futures or ahead_futures[ahead].cancelled():
-                        ahead_futures[ahead] = self._chunk(chat_id, msg_id, msg, ahead, AHEAD if urgent else IDLE)
+                        ahead_futures[ahead] = self._chunk(chat_id, msg_id, msg, ahead, ahead_priority)
                 data = needed.result(timeout=180)
                 served += 1
                 low = start - index * CHUNK if index == first else 0

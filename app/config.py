@@ -10,6 +10,8 @@ DRIVE_CREDENTIALS = DATA_DIR / "credentials.json"
 DRIVE_TOKEN = DATA_DIR / "token.json"
 TELEGRAM_CONFIG = DATA_DIR / "telegram.json"
 TELEGRAM_SESSION = DATA_DIR / "telegram"  # Telethon appends ".session"
+GROQ_CONFIG = DATA_DIR / "groq.json"
+TRANSCRIPTS_DIR = DATA_DIR / "transcripts"  # not under cache: "Clear cache" must not delete them
 
 VIDEO_EXTENSIONS = frozenset({
     ".mp4", ".m4v", ".mkv", ".avi", ".mov", ".qt", ".wmv", ".asf", ".flv", ".f4v",
@@ -27,6 +29,7 @@ SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
 
 def ensure_dirs() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def natural_sort_key(text: str) -> list:

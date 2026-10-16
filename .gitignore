@@ -8,5 +8,7 @@ __pycache__/
 credentials.json
 token.json
 telegram.json
+groq.json
+.env
 *.session
 *.db

@@ -1,6 +1,7 @@
 from PySide6.QtCore import QByteArray, QPoint
 from PySide6.QtWidgets import QInputDialog, QLineEdit, QMainWindow, QMenu, QMessageBox, QStackedWidget
 
+from ..transcribe.service import TranscriptManager
 from .add_course_dialog import AddCourseDialog
 from .course_view import CourseView
 from .library_view import LibraryView
@@ -19,7 +20,8 @@ class MainWindow(QMainWindow):
 
         self.library = LibraryView(db)
         self.thumbnails = ThumbnailManager(services, self)
-        self.course_view = CourseView(db, services, self.thumbnails)
+        self.transcripts = TranscriptManager(services, self)
+        self.course_view = CourseView(db, services, self.thumbnails, self.transcripts)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.library)
         self.stack.addWidget(self.course_view)
@@ -76,6 +78,7 @@ class MainWindow(QMainWindow):
         open_action = menu.addAction("Open")
         rename_action = menu.addAction("Rename...")
         rescan_action = menu.addAction("Sync videos (check for new)")
+        transcribe_action = menu.addAction("Transcribe whole course")
         reset_action = menu.addAction("Reset progress")
         menu.addSeparator()
         remove_action = menu.addAction("Remove course")
@@ -83,6 +86,12 @@ class MainWindow(QMainWindow):
 
         if chosen is open_action:
             self.open_course(course_id)
+        elif chosen is transcribe_action:
+            self.open_course(course_id, autoplay=False)
+            if self.course_view.course is not None:
+                self.course_view.show_transcript()
+                self.course_view.transcribe_course()
+            return
         elif chosen is rename_action:
             name, ok = QInputDialog.getText(self, "Rename course", "Course name:", QLineEdit.EchoMode.Normal, course.name)
             if ok and name.strip():
@@ -112,5 +121,6 @@ class MainWindow(QMainWindow):
         self.course_view.exit_fullscreen()
         self.course_view.shutdown()
         self.thumbnails.shutdown()
+        self.transcripts.shutdown()
         self.db.set_state("window_geometry", bytes(self.saveGeometry().toHex()).decode())
         super().closeEvent(event)

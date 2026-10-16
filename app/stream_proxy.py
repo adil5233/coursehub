@@ -6,6 +6,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
+from .telegram.client import AHEAD, IDLE, URGENT
+
 DRIVE_MEDIA_URL = "https://www.googleapis.com/drive/v3/files/{}?alt=media&supportsAllDrives=true"
 _DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
@@ -13,6 +15,16 @@ _CONTENT_RANGE_START = re.compile(r"^bytes (\d+)-")
 _BUFFER = 256 * 1024
 SERVED_BLOCK = 512 * 1024
 _FORWARD_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges")
+
+
+def _priority(path: str) -> int:
+    """?preview=1 (seek-bar previews) yields to everything; ?bulk=1 (transcripts) behaves like read-ahead."""
+    query = path.partition("?")[2]
+    if "preview=1" in query:
+        return IDLE
+    if "bulk=1" in query:
+        return AHEAD
+    return URGENT
 
 
 class _Server(ThreadingHTTPServer):
@@ -85,7 +97,7 @@ class _Handler(BaseHTTPRequestHandler):
             if parts[1] == "drive" and len(parts) == 3 and _DRIVE_ID.match(parts[2]):
                 self._drive(parts[2], head)
             elif parts[1] == "tg" and len(parts) == 4:
-                self._telegram(int(parts[2]), int(parts[3]), head, background=self.path.endswith("?preview=1"))
+                self._telegram(int(parts[2]), int(parts[3]), head, _priority(self.path))
             else:
                 self.send_error(404)
         except ConnectionError:
@@ -133,7 +145,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.proxy.mark_served(file_id, position, len(chunk))
                 position += len(chunk)
 
-    def _telegram(self, chat_id: int, msg_id: int, head: bool, background: bool = False) -> None:
+    def _telegram(self, chat_id: int, msg_id: int, head: bool, priority: int) -> None:
         tg = self.proxy.telegram
         if tg is None or not tg.is_authorized:
             self.send_error(503, "Telegram is not connected")
@@ -162,5 +174,5 @@ class _Handler(BaseHTTPRequestHandler):
         self._start(206 if partial else 200, headers)
         if head:
             return
-        for chunk in tg.iter_range(chat_id, msg_id, start, end, urgent=not background):
+        for chunk in tg.iter_range(chat_id, msg_id, start, end, priority):
             self.wfile.write(chunk)

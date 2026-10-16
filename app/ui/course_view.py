@@ -1,8 +1,8 @@
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QProgressBar, QPushButton, QSplitter,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QButtonGroup, QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QProgressBar, QPushButton,
+    QSplitter, QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..config import (
@@ -10,10 +10,12 @@ from ..config import (
 )
 from ..models import Course, Video
 from ..player.vlc_widget import SEEK_STEP_MS, VOLUME_STEP, VideoPlayer, glyph_icon
+from ..transcribe import groq_client, has_transcript, load_transcript, srt_path
 from .notes_panel import NotesPanel
 from .remote import ensure_source, scan_source
 from .theme import ACCENT
 from .thumbnails import cover_pixmap, load_thumb
+from .transcript_panel import TranscriptPanel
 from .utils import show_error
 
 VIDEO_ID = Qt.ItemDataRole.UserRole
@@ -82,12 +84,16 @@ def _thin_bar(width: int | None = None) -> QProgressBar:
 class CourseView(QWidget):
     back_requested = Signal()
 
-    def __init__(self, db, services, thumbnails, parent=None) -> None:
+    def __init__(self, db, services, thumbnails, transcripts, parent=None) -> None:
         super().__init__(parent)
         self.db = db
         self.services = services
         self.thumbnails = thumbnails
         self.thumbnails.ready.connect(self._on_thumbnail_ready)
+        self.transcripts = transcripts
+        transcripts.progress.connect(self._on_transcript_progress)
+        transcripts.finished.connect(self._on_transcript_finished)
+        transcripts.failed.connect(self._on_transcript_failed)
         self._thumbs: dict[int, QPixmap | None] = {}
         self.course: Course | None = None
         self.videos: list[Video] = []
@@ -159,7 +165,11 @@ class CourseView(QWidget):
         self.playlist_btn.setCheckable(True)
         self.playlist_btn.setToolTip("Show / hide course content (T)")
         self.playlist_btn.toggled.connect(self.set_playlist_visible)
-        for button in (self.prev_btn, self.next_btn, self.complete_btn, self.notes_btn, self.playlist_btn):
+        self.transcript_btn = QPushButton("Transcript")
+        self.transcript_btn.setToolTip("Show the transcript of this lecture")
+        self.transcript_btn.clicked.connect(self.show_transcript)
+        for button in (self.prev_btn, self.next_btn, self.complete_btn, self.notes_btn, self.playlist_btn,
+                       self.transcript_btn):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         actions = QHBoxLayout()
@@ -167,6 +177,7 @@ class CourseView(QWidget):
         for button in (self.prev_btn, self.next_btn, self.complete_btn):
             actions.addWidget(button)
         actions.addStretch(1)
+        actions.addWidget(self.transcript_btn)
         actions.addWidget(self.notes_btn)
         actions.addWidget(self.playlist_btn)
 
@@ -224,14 +235,44 @@ class CourseView(QWidget):
         self.tree.customContextMenuRequested.connect(self._tree_menu)
         self.tree.itemClicked.connect(self._on_item_activated)
 
+        content_page = QWidget()
+        content_layout = QVBoxLayout(content_page)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+        content_layout.addWidget(side_title)
+        content_layout.addWidget(self.side_meta)
+        content_layout.addWidget(self.side_progress)
+        content_layout.addSpacing(6)
+        content_layout.addWidget(self.tree, 1)
+
+        self.transcript = TranscriptPanel()
+        self.transcript.seek_requested.connect(self.player.seek)
+        self.transcript.generate_requested.connect(lambda: self.transcribe(self.current, front=True))
+        self.transcript.cancel_requested.connect(
+            lambda: self.current is not None and self.transcripts.cancel(self.current.id))
+
+        self.side_stack = QStackedWidget()
+        self.side_stack.addWidget(content_page)
+        self.side_stack.addWidget(self.transcript)
+        tabs = QHBoxLayout()
+        tabs.setSpacing(8)
+        self.side_tabs = QButtonGroup(self)
+        for index, name in enumerate(("Content", "Transcript")):
+            tab = QPushButton(name)
+            tab.setCheckable(True)
+            tab.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            tab.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.side_tabs.addButton(tab, index)
+            tabs.addWidget(tab)
+        tabs.addStretch(1)
+        self.side_tabs.idClicked.connect(self.side_stack.setCurrentIndex)
+        self.side_tabs.button(0).setChecked(True)
+
         side_layout = QVBoxLayout(self.side_panel)
         side_layout.setContentsMargins(14, 14, 8, 10)
-        side_layout.setSpacing(6)
-        side_layout.addWidget(side_title)
-        side_layout.addWidget(self.side_meta)
-        side_layout.addWidget(self.side_progress)
-        side_layout.addSpacing(6)
-        side_layout.addWidget(self.tree, 1)
+        side_layout.setSpacing(10)
+        side_layout.addLayout(tabs)
+        side_layout.addWidget(self.side_stack, 1)
 
         body_split = QSplitter(Qt.Orientation.Horizontal)
         body_split.setChildrenCollapsible(False)
@@ -305,6 +346,56 @@ class CourseView(QWidget):
         self.playlist_btn.blockSignals(False)
         self.db.set_state("playlist_visible", "1" if visible else "0")
 
+    def show_transcript(self) -> None:
+        self.set_playlist_visible(True)
+        self.side_tabs.button(1).setChecked(True)
+        self.side_stack.setCurrentIndex(1)
+
+    # ---- transcripts ----
+    def transcribe(self, video: Video | None, front: bool = False) -> None:
+        """Queue a lecture for Groq Whisper (asks for the API key if it is missing)."""
+        if video is None or self.course is None:
+            return
+        if not groq_client.load_settings()["api_key"]:
+            QMessageBox.information(
+                self, "Groq API key needed",
+                "Transcripts use Groq's free Whisper API.\n\nCreate a free key at console.groq.com/keys, "
+                "then paste it in Settings \u2192 Transcripts.")
+            return
+        if not ensure_source(self, self.services, self.course.source):
+            return
+        try:
+            self.transcripts.enqueue(self.course, video, front)
+        except (FileNotFoundError, ValueError) as exc:
+            show_error(self, "Cannot transcribe", exc)
+
+    def _show_transcript_state(self) -> None:
+        video = self.current
+        if video is None:
+            self.transcript.show_idle("Select a lecture to see its transcript.", can_generate=False)
+        elif (segments := load_transcript(video.id)) is not None:
+            self.transcript.show_segments(segments)
+        elif video.id in self.transcripts.status:
+            self.transcript.show_progress(*self.transcripts.status[video.id])
+        else:
+            self.transcript.show_idle("No transcript yet. Generate one with Groq Whisper (free, takes about a "
+                                      "minute per hour of video once the audio is downloaded).")
+
+    def _on_transcript_progress(self, video_id: int, text: str, fraction: float) -> None:
+        if self.current is not None and self.current.id == video_id:
+            self.transcript.show_progress(text, fraction)
+
+    def _on_transcript_finished(self, video_id: int) -> None:
+        if self.current is None or self.current.id != video_id:
+            return
+        self._show_transcript_state()
+        if not self.player.has_subtitle():
+            self.player.add_subtitle(str(srt_path(video_id)))
+
+    def _on_transcript_failed(self, video_id: int, message: str) -> None:
+        if self.current is not None and self.current.id == video_id:
+            self.transcript.show_idle(message)
+
     # ---- course lifecycle ----
     def open_course(self, course_id: int, autoplay: bool = False) -> bool:
         course = self.db.get_course(course_id)
@@ -344,6 +435,7 @@ class CourseView(QWidget):
         self._sections.clear()
         self.tree.clear()
         self.notes.set_video(None)
+        self._show_transcript_state()
         self._update_info()
 
     def shutdown(self) -> None:
@@ -408,6 +500,8 @@ class CourseView(QWidget):
             show_error(self, "Cannot play video", exc)
             return
         subtitle = self.services.subtitle_for(self.course, video)
+        if subtitle is None and has_transcript(video.id):
+            subtitle = str(srt_path(video.id))
         self.services.prefetch(self.course, video)
 
         previous, self.current = self.current, video
@@ -415,6 +509,10 @@ class CourseView(QWidget):
         self.db.set_last_video(self.course.id, video.id)
         self.course.last_video_id = video.id
         self.notes.set_video(video.id)
+        self._show_transcript_state()
+        if (not has_transcript(video.id) and not self.transcripts.is_busy(video.id)
+                and (settings := groq_client.load_settings())["auto"] and settings["api_key"]):
+            self.transcripts.enqueue(self.course, video, front=True)
         for v in (previous, video):
             if v is not None:
                 self._style_item(v)
@@ -446,6 +544,7 @@ class CourseView(QWidget):
             self._update_info()
         if not video.completed and position >= length - COMPLETE_TOLERANCE_MS:
             self._set_completed(video, True)
+        self.transcript.set_position(position)
         self._update_early_up_next(position, length)
         if not self._next_prefetched and (position >= length * 0.6 or length - position <= 120_000):
             self._next_prefetched = True
@@ -502,7 +601,7 @@ class CourseView(QWidget):
     def _update_info(self) -> None:
         video = self.current
         has_video = video is not None
-        for button in (self.complete_btn, self.notes_btn):
+        for button in (self.complete_btn, self.notes_btn, self.transcript_btn):
             button.setEnabled(has_video)
         if not has_video:
             self.video_title.clear()
@@ -639,11 +738,30 @@ class CourseView(QWidget):
         menu = QMenu(self)
         play_action = menu.addAction("Play")
         toggle_action = menu.addAction("Mark as not complete" if video.completed else "Mark as complete")
+        menu.addSeparator()
+        transcribe_action = menu.addAction("Regenerate transcript" if has_transcript(video.id) else "Generate transcript")
+        transcribe_action.setEnabled(not self.transcripts.is_busy(video.id))
+        all_action = menu.addAction("Transcribe whole course")
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is play_action:
             self.play_video(video.id, True)
         elif chosen is toggle_action:
             self._set_completed(video, not video.completed)
+        elif chosen is transcribe_action:
+            self.transcribe(video)
+        elif chosen is all_action:
+            self.transcribe_course()
+
+    def transcribe_course(self) -> None:
+        """Queue every lecture without a transcript, in course order."""
+        pending = [v for v in self.videos if not has_transcript(v.id) and not self.transcripts.is_busy(v.id)]
+        if not pending:
+            QMessageBox.information(self, "Transcripts", "Every lecture already has a transcript (or is queued).")
+            return
+        for video in pending:
+            self.transcribe(video)
+            if not self.transcripts.is_busy(video.id):
+                return  # key missing / source not connected: the user was already told
 
     # ---- fullscreen ----
     def toggle_fullscreen(self) -> None:

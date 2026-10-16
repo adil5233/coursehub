@@ -5,4 +5,5 @@ google-api-python-client>=2.100
 google-auth>=2.30
 google-auth-oauthlib>=1.2
 telethon>=1.36
+av>=14
 pytest>=8
