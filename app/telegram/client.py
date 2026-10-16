@@ -219,6 +219,20 @@ class TelegramService:
             self._write_disk(key, data)
 
     # ---- disk cache ----
+    def cached_chunks(self, chat_id: int, msg_id: int) -> set[int]:
+        """Indexes of the file's chunks already in memory or on disk."""
+        with self._lock:
+            found = {key[2] for key in self._chunks if key[0] == chat_id and key[1] == msg_id}
+        try:
+            names = os.listdir(self._disk_path((chat_id, msg_id, 0)).parent)
+        except OSError:
+            names = []
+        for name in names:
+            stem, ext = os.path.splitext(name)
+            if ext == ".bin" and stem.isdigit():
+                found.add(int(stem))
+        return found
+
     def clear_memory_cache(self) -> None:
         with self._lock:
             self._chunks.clear()

@@ -123,6 +123,39 @@ class SeekSlider(QSlider):
     def __init__(self, orientation, parent=None) -> None:
         super().__init__(orientation, parent)
         self._scrubbing = False
+        self._buffered: list[tuple[float, float]] = []
+
+    def set_buffered(self, ranges: list[tuple[float, float]]) -> None:
+        """Already-downloaded parts of the video as (start, end) fractions, drawn lighter like YouTube."""
+        if ranges != self._buffered:
+            self._buffered = ranges
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._buffered:
+            return
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        style = self.style()
+        groove = style.subControlRect(QStyle.ComplexControl.CC_Slider, option,
+                                      QStyle.SubControl.SC_SliderGroove, self)
+        handle = style.subControlRect(QStyle.ComplexControl.CC_Slider, option,
+                                      QStyle.SubControl.SC_SliderHandle, self)
+        span = max(1, groove.width() - handle.width())
+        left = groove.x() + handle.width() / 2
+        played_end = handle.right() + 1  # keep the red played part and the handle untouched
+        y = handle.center().y() + 0.5
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 90))
+        for start, end in self._buffered:
+            x1 = max(left + start * span, played_end)
+            x2 = left + end * span
+            if x2 - x1 >= 1:
+                painter.drawRoundedRect(QRectF(x1, y - 2, x2 - x1, 4), 2, 2)
+        painter.end()
 
     def _value_at(self, x: float) -> int:
         option = QStyleOptionSlider()
@@ -656,6 +689,7 @@ class VideoPlayer(QWidget):
         self._spu_track = -1
         self._seek_target = None
         self._ended_early = False
+        self.slider.set_buffered([])
         self.cc_btn.hide()
         # ":start-paused" + ":start-time" freezes VLC 3, so start playing muted and pause once ready.
         self._player.audio_set_mute(self._muted or not autoplay)
@@ -670,6 +704,7 @@ class VideoPlayer(QWidget):
         self._mrl = None
         self._last_time = self._length = 0
         self.slider.setValue(0)
+        self.slider.set_buffered([])
         self.status_label.clear()
         self.status_label.hide()
         self.cc_btn.hide()

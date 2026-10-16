@@ -60,6 +60,27 @@ def test_disk_cache_survives_restart(tg, tmp_path):
         restarted.shutdown()
 
 
+def test_cached_chunks_reports_memory_and_disk(tg, tmp_path):
+    b"".join(tg.iter_range(1, 2, 0, 10))
+    (tmp_path / "tg" / "1_2").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tg" / "1_2" / "4.bin").write_bytes(b"x")
+    (tmp_path / "tg" / "1_2" / "5.123.tmp").write_bytes(b"x")
+    assert {0, 4} <= tg.cached_chunks(1, 2)
+    assert 5 not in tg.cached_chunks(1, 2)
+    assert tg.cached_chunks(1, 3) == set()
+
+
+def test_proxy_marks_served_blocks():
+    proxy = StreamProxy()
+    try:
+        proxy.mark_served("f", 0, 10)
+        proxy.mark_served("f", 3 * 512 * 1024 - 1, 2)
+        assert proxy.served_blocks("f") == {0, 2, 3}
+        assert proxy.served_blocks("other") == set()
+    finally:
+        proxy.shutdown()
+
+
 def test_proxy_ranges(tg):
     proxy = StreamProxy()
     proxy.telegram = tg

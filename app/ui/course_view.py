@@ -254,6 +254,9 @@ class CourseView(QWidget):
         self.save_timer = QTimer(self)
         self.save_timer.setInterval(SAVE_INTERVAL_MS)
         self.save_timer.timeout.connect(self.save_progress)
+        self.buffer_timer = QTimer(self)
+        self.buffer_timer.setInterval(1000)
+        self.buffer_timer.timeout.connect(self._update_buffered)
 
         self.player.set_rate(float(db.get_state("speed", "1.0")))
         self.player.set_volume(int(db.get_state("volume", "80")))
@@ -317,7 +320,12 @@ class CourseView(QWidget):
             self.play_video(start.id, autoplay)
             self.thumbnails.request_course(course, self.videos, self.videos.index(start))
         self.save_timer.start()
+        self.buffer_timer.start()
         return True
+
+    def _update_buffered(self) -> None:
+        if self.course is not None and self.current is not None and self.player.has_media():
+            self.player.slider.set_buffered(self.services.buffered_ranges(self.course, self.current))
 
     def close_course(self) -> None:
         self.thumbnails.cancel()
@@ -325,6 +333,7 @@ class CourseView(QWidget):
         self.save_progress()
         self._cancel_up_next()
         self.save_timer.stop()
+        self.buffer_timer.stop()
         self.exit_fullscreen()
         self.player.stop()
         self.course = None

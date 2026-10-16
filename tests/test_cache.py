@@ -1,5 +1,12 @@
 from app.config import format_bytes
-from app.services import empty_folder, folder_size
+from app.services import blocks_to_ranges, empty_folder, folder_size
+
+
+def test_blocks_to_ranges():
+    assert blocks_to_ranges({0, 1, 2, 5}, 10, 100) == [(0.0, 0.3), (0.5, 0.6)]
+    assert blocks_to_ranges({9, 10}, 10, 95) == [(90 / 95, 1.0)]  # last block is partial, beyond-end ignored
+    assert blocks_to_ranges(set(), 10, 100) == []
+    assert blocks_to_ranges({0}, 10, 0) == []
 
 
 def test_folder_size_and_empty(tmp_path):

@@ -9,7 +9,9 @@ import requests
 DRIVE_MEDIA_URL = "https://www.googleapis.com/drive/v3/files/{}?alt=media&supportsAllDrives=true"
 _DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+_CONTENT_RANGE_START = re.compile(r"^bytes (\d+)-")
 _BUFFER = 256 * 1024
+SERVED_BLOCK = 512 * 1024
 _FORWARD_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges")
 
 
@@ -26,6 +28,8 @@ class StreamProxy:
         self.secret = secrets.token_urlsafe(16)
         self.drive_token = None  # callable(force_refresh: bool) -> str
         self.telegram = None  # TelegramService
+        self._served: dict[str, set[int]] = {}
+        self._served_lock = threading.Lock()
         owner = self
 
         class Handler(_Handler):
@@ -40,6 +44,18 @@ class StreamProxy:
 
     def telegram_url(self, chat_id: int, msg_id: int) -> str:
         return f"http://127.0.0.1:{self.port}/{self.secret}/tg/{chat_id}/{msg_id}"
+
+    def mark_served(self, key: str, start: int, length: int) -> None:
+        if length <= 0:
+            return
+        blocks = range(start // SERVED_BLOCK, (start + length - 1) // SERVED_BLOCK + 1)
+        with self._served_lock:
+            self._served.setdefault(key, set()).update(blocks)
+
+    def served_blocks(self, key: str) -> set[int]:
+        """SERVED_BLOCK-sized blocks of the file already sent to VLC in this session."""
+        with self._served_lock:
+            return set(self._served.get(key, ()))
 
     def shutdown(self) -> None:
         self._server.shutdown()
@@ -110,8 +126,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._start(resp.status_code, out)
             if head:
                 return
+            match = _CONTENT_RANGE_START.match(resp.headers.get("Content-Range", ""))
+            position = int(match.group(1)) if match else 0
             for chunk in resp.raw.stream(_BUFFER, decode_content=False):
                 self.wfile.write(chunk)
+                self.proxy.mark_served(file_id, position, len(chunk))
+                position += len(chunk)
 
     def _telegram(self, chat_id: int, msg_id: int, head: bool) -> None:
         tg = self.proxy.telegram

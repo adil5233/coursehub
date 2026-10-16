@@ -8,7 +8,7 @@ import requests
 
 from .config import CACHE_DIR, SUBTITLE_EXTENSIONS
 from .models import Course, Video
-from .stream_proxy import DRIVE_MEDIA_URL, StreamProxy
+from .stream_proxy import DRIVE_MEDIA_URL, SERVED_BLOCK, StreamProxy
 
 
 def folder_size(folder: Path) -> int:
@@ -31,6 +31,22 @@ def empty_folder(folder: Path) -> None:
             shutil.rmtree(child, ignore_errors=True)
         else:
             child.unlink(missing_ok=True)
+
+
+def blocks_to_ranges(blocks: set[int], block_size: int, total: int) -> list[tuple[float, float]]:
+    """Merge block indexes into (start, end) fractions of a file of `total` bytes."""
+    if total <= 0:
+        return []
+    merged: list[list[int]] = []
+    for index in sorted(blocks):
+        start, end = index * block_size, min(total, (index + 1) * block_size)
+        if start >= total:
+            break
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start / total, end / total) for start, end in merged]
 
 
 class Services:
@@ -71,6 +87,17 @@ class Services:
         if course.source == "drive":
             return self.proxy.drive_url(video.ref)
         return self.proxy.telegram_url(int(course.root), int(video.ref))
+
+    def buffered_ranges(self, course: Course, video: Video) -> list[tuple[float, float]]:
+        if course.source == "local":
+            return [(0.0, 1.0)]
+        if course.source == "drive":
+            return blocks_to_ranges(self.proxy.served_blocks(video.ref), SERVED_BLOCK, video.size)
+        if self.telegram is None:
+            return []
+        from .telegram.client import CHUNK
+
+        return blocks_to_ranges(self.telegram.cached_chunks(int(course.root), int(video.ref)), CHUNK, video.size)
 
     def prefetch(self, course: Course, video: Video) -> None:
         """Start downloading the parts VLC needs first, without blocking the UI."""
