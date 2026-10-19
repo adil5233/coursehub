@@ -30,6 +30,9 @@ class FakeDb:
     def delete_note(self, note_id):
         del self.notes[note_id]
 
+    def mistakes_for_video(self, video_id):
+        return []
+
 
 @pytest.fixture(scope="module")
 def app():

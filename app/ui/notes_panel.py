@@ -266,7 +266,8 @@ class NotesPanel(QFrame):
         self.ai_status = QLabel()
         self.ai_status.setObjectName("Muted")
         self.ai_button = QPushButton("AI summary")
-        self.ai_button.setToolTip("Write a summary note of this lecture from its transcript (Groq, free)")
+        self.ai_button.setToolTip("Write a revision note of this lecture from its transcript (Groq, free): "
+                                  "QUESTIONS, ANSWERS, MERI GALTI, EK LINE ME + mantra")
         self.ai_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.ai_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.ai_button.clicked.connect(self._generate_summary)
@@ -388,7 +389,7 @@ class NotesPanel(QFrame):
                 "AI summaries use Groq's free API.\n\nCreate a free key at console.groq.com/keys, "
                 "then paste it in Settings \u2192 Transcripts.")
             return
-        self.summarizer.start(self.video_id, segments)
+        self.summarizer.start(self.video_id, segments, self.db.mistakes_for_video(self.video_id))
         self._sync_ai()
 
     def _on_summary_progress(self, video_id: int, text: str) -> None:

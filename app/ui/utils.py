@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QEventLoop, QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressDialog, QWidget
 
-from ..notes_export import notes_markdown
+from ..notes_export import notes_markdown, revision_file_name, revision_markdown, revision_questions
 
 
 class _Finished(QObject):
@@ -77,3 +77,33 @@ def export_course_notes(parent: QWidget | None, db, course) -> None:
         show_error(parent, "Export notes", exc)
         return
     QMessageBox.information(parent, "Export notes", f"Saved {len(items)} note(s) to:\n{path}")
+
+
+def export_revision_notes(parent: QWidget | None, db, course) -> None:
+    """One review.py-style file per lecture (QUESTIONS / ANSWERS / MERI GALTI / EK LINE ME) in a chosen folder."""
+    from ..transcribe.steps import load_steps
+
+    folder = QFileDialog.getExistingDirectory(parent, "Export revision notes (one file per lecture)",
+                                              str(Path.home() / "Documents"))
+    if not folder:
+        return
+    written = 0
+    try:
+        for number, video in enumerate(db.get_videos(course.id), 1):
+            steps_data = load_steps(video.id)
+            pairs = revision_questions(steps_data, db.get_open_quiz(video.id))
+            mistakes = db.mistakes_for_video(video.id)
+            if not pairs and not mistakes:
+                continue
+            first_line = next((s.get("ek_line") for s in steps_data["steps"] if s.get("ek_line")), "")
+            text = revision_markdown(number, video.title, pairs, mistakes, steps_data["mantra"] or first_line)
+            (Path(folder) / revision_file_name(number, video.title)).write_text(text, encoding="utf-8")
+            written += 1
+    except OSError as exc:
+        show_error(parent, "Export revision notes", exc)
+        return
+    if written:
+        QMessageBox.information(parent, "Export revision notes", f"Saved {written} lecture file(s) to:\n{folder}")
+    else:
+        QMessageBox.information(parent, "Export revision notes",
+                                "Nothing to export yet: make study steps (Steps tab) or an own-words quiz first.")

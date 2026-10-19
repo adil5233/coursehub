@@ -11,7 +11,7 @@ from .remote import scan_source
 from .search_dialog import SearchDialog
 from .settings_dialog import SettingsDialog
 from .thumbnails import ThumbnailManager
-from .utils import export_course_notes
+from .utils import export_course_notes, export_revision_notes
 
 
 class MainWindow(QMainWindow):
@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
         rescan_action = menu.addAction("Sync videos (check for new)")
         transcribe_action = menu.addAction("Transcribe whole course")
         export_action = menu.addAction("Export notes (Markdown)...")
+        revision_action = menu.addAction("Export revision notes (review.py format)...")
         reset_action = menu.addAction("Reset progress")
         menu.addSeparator()
         remove_action = menu.addAction("Remove course")
@@ -151,6 +152,8 @@ class MainWindow(QMainWindow):
             return
         elif chosen is export_action:
             export_course_notes(self, self.db, course)
+        elif chosen is revision_action:
+            export_revision_notes(self, self.db, course)
         elif chosen is rename_action:
             name, ok = QInputDialog.getText(self, "Rename course", "Course name:", QLineEdit.EchoMode.Normal, course.name)
             if ok and name.strip():

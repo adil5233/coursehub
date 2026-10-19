@@ -22,24 +22,43 @@ LANGUAGE_RULE = (
     "- Neural network me har neuron inputs ko weights se multiply karke bias add karta hai.\n"
     "- Training ka matlab hai weights aur bias ko adjust karna taaki loss kam ho."
 )
+SECTIONS = ("QUESTIONS", "ANSWERS", "MERI GALTI", "EK LINE ME")
 NOTE_FORMAT = (
-    "Format (plain text):\n"
+    "Format (plain text, bilkul isi order me, revision ke liye):\n"
     "- Pehli line: lecture ka chhota title, bina kisi symbol ke\n"
-    "- Phir 'Key points:' aur uske neeche 8-15 bullets, har bullet '- ' se shuru\n"
-    "- Important definitions / terms bhi bullets me, short aur clear\n"
-    "- ``` code block SIRF tab do jab lecture me sach me code likha ya padha gaya ho; warna koi code nahi\n"
+    "- Line 'QUESTIONS', phir lecture ke 4-6 sabse important sawaal (kya / kyun / kaise), har ek "
+    "'Q1: ...', 'Q2: ...' aur har sawaal ke baad ek khali line\n"
+    "- Line 'ANSWERS', phir har sawaal ka 1-3 line ka jawab 'A1: ...', 'A2: ...' (same number), har jawab ke baad "
+    "ek khali line\n"
+    "- Line 'MERI GALTI', phir neeche di gayi student ki galtiyon ke '- ' bullets: galti aur sahi baat ek line "
+    "me. Koi galti nahi di gayi to sirf 'Abhi koi nahi'\n"
+    "- Line 'EK LINE ME', phir poore lecture ka saar sirf ek line me\n"
+    "- Aakhri line: 'Mantra: ...' (max 12 words, yaad rehne layak)\n"
+    "- ``` code block SIRF tab do jab lecture me sach me code likha ya padha gaya ho (ANSWERS me); warna koi code "
+    "nahi\n"
     "- Markdown headings (#), bold (**) ya tables mat use karo\n\n" + LANGUAGE_RULE
 )
-SINGLE_PROMPT = "Neeche ek lecture ka transcript hai. Iska ek summary note banao.\n\n{format}\n\nTranscript:\n{text}"
+SINGLE_PROMPT = (
+    "Neeche ek lecture ka transcript hai. Iska ek revision note banao.\n\n{format}\n\n"
+    "Student ki galtiyan (MERI GALTI ke liye):\n{mistakes}\n\nTranscript:\n{text}"
+)
 PART_PROMPT = (
     "Neeche ek lambe lecture ke transcript ka hissa {index}/{total} hai. Is hisse ke important points, "
     "definitions aur (agar sach me bataya gaya ho to) code ko short '- ' bullets me likho "
     "(max 12 bullets, koi title nahi).\n\n" + LANGUAGE_RULE + "\n\nTranscript:\n{text}"
 )
 COMBINE_PROMPT = (
-    "Neeche ek lecture ke alag-alag hisson ke notes hain, order me. Inhe jod kar poore lecture ka ek summary note "
-    "banao; repeat points hata do.\n\n{format}\n\nHisson ke notes:\n{text}"
+    "Neeche ek lecture ke alag-alag hisson ke notes hain, order me. Inhe jod kar poore lecture ka ek revision note "
+    "banao; repeat points hata do.\n\n{format}\n\nStudent ki galtiyan (MERI GALTI ke liye):\n{mistakes}\n\n"
+    "Hisson ke notes:\n{text}"
 )
+
+
+def mistakes_text(mistakes: list[dict]) -> str:
+    """The lecture's logged mistakes as prompt lines (or a note that there are none)."""
+    lines = [f"- Sawaal: {m['question']} | Mera jawab: {m.get('my_answer') or '(khaali)'} | "
+             f"Sahi: {m.get('correct') or '-'} | Baar {m.get('wrong_count', 1)}" for m in mistakes]
+    return "\n".join(lines) if lines else "(koi galti nahi)"
 
 
 class Cancelled(Exception):
@@ -123,15 +142,17 @@ def _clean(note: str) -> str:
 
 
 def summarize(api_key: str, segments: list[Segment], report=lambda _text: None,
-              cancel: threading.Event | None = None) -> str:
-    """One Hinglish summary note for the whole lecture."""
+              cancel: threading.Event | None = None, mistakes: list[dict] | None = None) -> str:
+    """One Hinglish revision note for the whole lecture: QUESTIONS / ANSWERS / MERI GALTI / EK LINE ME + mantra."""
     cancel = cancel or threading.Event()
+    wrong = mistakes_text(mistakes or [])
     parts = transcript_parts(segments, PART_CHARS)
     if not parts:
         raise groq_client.GroqError("The transcript is empty.")
     if len(parts) == 1:
         report("Writing the summary...")
-        return _clean(ask(api_key, SINGLE_PROMPT.format(format=NOTE_FORMAT, text=parts[0]), 2000, report, cancel))
+        prompt = SINGLE_PROMPT.format(format=NOTE_FORMAT, mistakes=wrong, text=parts[0])
+        return _clean(ask(api_key, prompt, 2000, report, cancel))
     part_notes = []
     for index, part in enumerate(parts, 1):
         report(f"Reading part {index} of {len(parts)}...")
@@ -139,7 +160,8 @@ def summarize(api_key: str, segments: list[Segment], report=lambda _text: None,
         part_notes.append(ask(api_key, prompt, 1200, report, cancel))
     report("Writing the summary...")
     joined = "\n\n".join(f"Hissa {i}:\n{notes}" for i, notes in enumerate(part_notes, 1))
-    return _clean(ask(api_key, COMBINE_PROMPT.format(format=NOTE_FORMAT, text=joined), 2000, report, cancel))
+    prompt = COMBINE_PROMPT.format(format=NOTE_FORMAT, mistakes=wrong, text=joined)
+    return _clean(ask(api_key, prompt, 2000, report, cancel))
 
 
 class NoteSummarizer(QObject):
@@ -160,13 +182,14 @@ class NoteSummarizer(QObject):
         with self._lock:
             return self._busy
 
-    def start(self, video_id: int, segments: list[Segment]) -> bool:
+    def start(self, video_id: int, segments: list[Segment], mistakes: list[dict] | None = None) -> bool:
         with self._lock:
             if self._busy is not None:
                 return False
             self._busy = video_id
         self.status = "Starting..."
-        threading.Thread(target=self._run, args=(video_id, segments), name="ai-summary", daemon=True).start()
+        threading.Thread(target=self._run, args=(video_id, segments, mistakes or []), name="ai-summary",
+                         daemon=True).start()
         return True
 
     def shutdown(self) -> None:
@@ -176,13 +199,14 @@ class NoteSummarizer(QObject):
         self.status = text
         self.progress.emit(video_id, text)
 
-    def _run(self, video_id: int, segments: list[Segment]) -> None:
+    def _run(self, video_id: int, segments: list[Segment], mistakes: list[dict]) -> None:
         result, error = None, None
         try:
             api_key = groq_client.load_settings()["api_key"]
             if not api_key:
                 raise groq_client.InvalidKey("No Groq API key.")
-            result = summarize(api_key, segments, lambda text: self._report(video_id, text), self._cancel)
+            extra = {"mistakes": mistakes} if mistakes else {}
+            result = summarize(api_key, segments, lambda text: self._report(video_id, text), self._cancel, **extra)
         except Cancelled:
             pass
         except groq_client.InvalidKey as exc:
