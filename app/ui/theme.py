@@ -49,6 +49,12 @@ QFrame#QuizOption[state="selected"] {{ border: 1px solid #3ea6ff; background: rg
 QFrame#QuizOption[state="correct"] {{ border: 1px solid #2ba640; background: rgba(43, 166, 64, 0.18); }}
 QFrame#QuizOption[state="wrong"] {{ border: 1px solid #ff4d6a; background: rgba(255, 0, 51, 0.15); }}
 QLabel#QuizOptionText {{ background: transparent; font-size: 14px; }}
+QFrame#Checkpoint {{ background: #2b2b2b; border: 1px solid #3ea6ff; border-radius: 12px; }}
+QFrame#Checkpoint QLabel {{ background: transparent; }}
+QLabel#CheckpointKicker {{ color: #3ea6ff; font-size: 11px; font-weight: 800; }}
+QLabel#CheckpointQuestion {{ font-size: 14px; font-weight: 600; }}
+QLabel#CheckpointAnswer {{ color: #7ee787; }}
+QLabel#Mantra {{ color: #ffd166; font-weight: 600; }}
 QPlainTextEdit#NoteInput {{ background: {BG}; border: 1px solid #303030; border-radius: 8px; padding: 2px 4px; }}
 QPlainTextEdit#NoteInput:focus {{ border: 1px solid #3ea6ff; }}
 QScrollArea#NotesScroll, QWidget#NotesList {{ background: transparent; }}

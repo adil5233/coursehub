@@ -145,6 +145,7 @@ class SeekSlider(QSlider):
         self._scrubbing = False
         self._buffered: list[tuple[float, float]] = []
         self._chapters: list[float] = []  # chapter starts as fractions (gaps in the bar, like YouTube)
+        self._steps: list[float] = []  # study step starts as fractions (thin ticks)
         self._hover_fraction: float | None = None
         self._grow = 0.0  # 0 = resting, 1 = hovered
         self._grow_anim = QVariantAnimation(self)
@@ -162,6 +163,11 @@ class SeekSlider(QSlider):
     def set_chapters(self, fractions: list[float]) -> None:
         if fractions != self._chapters:
             self._chapters = fractions
+            self.update()
+
+    def set_steps(self, fractions: list[float]) -> None:
+        if fractions != self._steps:
+            self._steps = fractions
             self.update()
 
     def _set_grow(self, value) -> None:
@@ -205,6 +211,8 @@ class SeekSlider(QSlider):
         if self._hover_fraction is not None:
             bar(0.0, self._hover_fraction, QColor(255, 255, 255, 150))  # shows where a click would jump to
         bar(0.0, played, QColor(ACCENT))
+        for fraction in self._steps:
+            painter.fillRect(QRectF(left + fraction * span - 0.5, top - 3, 1, height + 6), QColor(255, 255, 255, 170))
         for fraction in self._chapters:
             painter.fillRect(QRectF(left + fraction * span - 1.5, top - 1, 3, height + 2), QColor(0, 0, 0, 220))
         radius = self.SCRUBBER * (1.0 if self._scrubbing else self._grow)
@@ -676,6 +684,7 @@ class VideoPlayer(QWidget):
         self._cues: CueTrack | None = None  # SRT/VTT drawn by the overlay instead of VLC
         self._cues_on = True
         self._chapters: list[dict] = []  # {"start_ms", "title"}
+        self._steps: list[int] = []  # study step starts in ms
         self._chapters_length = 0
         self._seek_target: int | None = None
         self._seek_deadline = 0.0
@@ -943,6 +952,8 @@ class VideoPlayer(QWidget):
         self.overlay.set_subtitle("")
         self._chapters = []
         self.slider.set_chapters([])
+        self._steps = []
+        self.slider.set_steps([])
         self._set_playing(False)
         self._update_time_label()
 
@@ -967,10 +978,18 @@ class VideoPlayer(QWidget):
         self._apply_chapters()
         self._update_time_label()
 
+    def set_steps(self, starts_ms: list[int]) -> None:
+        self._steps = sorted(starts_ms)
+        self._apply_chapters()
+
     def _apply_chapters(self) -> None:
         self._chapters_length = self._length
-        self.slider.set_chapters([c["start_ms"] / self._length for c in self._chapters
-                                  if 0 < c["start_ms"] < self._length] if self._length > 0 else [])
+
+        def fractions(starts: list[int]) -> list[float]:
+            return [ms / self._length for ms in starts if 0 < ms < self._length] if self._length > 0 else []
+
+        self.slider.set_chapters(fractions([c["start_ms"] for c in self._chapters]))
+        self.slider.set_steps(fractions(self._steps))
 
     def chapter_at(self, ms: int) -> str:
         title = ""
@@ -1177,7 +1196,7 @@ class VideoPlayer(QWidget):
         length = self._player.get_length()
         if length > 0:
             self._length = length
-        if self._chapters and self._length != self._chapters_length:
+        if (self._chapters or self._steps) and self._length != self._chapters_length:
             self._apply_chapters()
         position = self._player.get_time()
         # Before playback settles VLC reports 0 while buffering, which must not overwrite the resume position.

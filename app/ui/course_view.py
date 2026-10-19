@@ -13,11 +13,13 @@ from ..player.vlc_widget import SEEK_STEP_MS, VOLUME_STEP, VideoPlayer, glyph_ic
 from ..review import FIRST_INTERVAL, due_after
 from ..transcribe import groq_client, has_transcript, load_transcript, srt_path
 from ..transcribe.chapters import ChapterMaker, load_chapters
+from ..transcribe.steps import StepMaker, load_steps, step_index_at
 from ..transcribe.summary import NoteSummarizer
 from .ask_panel import AskPanel
 from .notes_panel import NotesPanel
 from .quiz_dialog import QuizDialog
 from .remote import ensure_source, scan_source
+from .steps_panel import StepsPanel
 from .theme import ACCENT
 from .thumbnails import cover_pixmap, load_thumb
 from .transcript_panel import TranscriptPanel
@@ -28,6 +30,8 @@ NOTES_MAX_SHARE = 0.5  # the notes panel never takes more than half of the left 
 COMPLETE_COLOR = "#2ba640"
 THUMB_W, THUMB_H = 120, 68
 _SCALE = 2  # draw at 2x so thumbnails stay sharp on high-DPI screens
+STEPS_TAB = 3
+PLAY_JUMP_MS = 2500  # a bigger jump between two position updates is a seek, not playback
 
 
 def _thumb_icon(base: QPixmap | None, video: Video, current: bool) -> QIcon:
@@ -113,6 +117,10 @@ class CourseView(QWidget):
         self._next_prefetched = False
         self._was_maximized = False
         self._resume_after_note = False
+        self._study_mode = db.get_state("study_mode", "0") == "1"
+        self._last_position: int | None = None
+        self._asked_steps: set[int] = set()  # checkpoints already shown in this viewing
+        self._resume_after_check = False
         self._notes_visible = db.get_state("notes_visible", "1") == "1"
         self._playlist_visible = db.get_state("playlist_visible", "1") == "1"
         self._panel_was_visible = True  # side panel state before the Transcript button opened it
@@ -186,8 +194,12 @@ class CourseView(QWidget):
         self.quiz_btn = QPushButton("Quiz")
         self.quiz_btn.setToolTip("Revision quiz for this lecture (made from its transcript)")
         self.quiz_btn.clicked.connect(lambda: self.current is not None and self.open_quiz(self.current))
+        self.study_btn = QPushButton("Study mode")
+        self.study_btn.setCheckable(True)
+        self.study_btn.setToolTip("Pause at the end of every step for a short check (needs steps: Steps tab)")
+        self.study_btn.toggled.connect(self.set_study_mode)
         for button in (self.prev_btn, self.next_btn, self.complete_btn, self.notes_btn, self.playlist_btn,
-                       self.transcript_btn, self.quiz_btn):
+                       self.transcript_btn, self.quiz_btn, self.study_btn):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         actions = QHBoxLayout()
@@ -195,6 +207,7 @@ class CourseView(QWidget):
         for button in (self.prev_btn, self.next_btn, self.complete_btn):
             actions.addWidget(button)
         actions.addStretch(1)
+        actions.addWidget(self.study_btn)
         actions.addWidget(self.quiz_btn)
         actions.addWidget(self.transcript_btn)
         actions.addWidget(self.notes_btn)
@@ -285,10 +298,21 @@ class CourseView(QWidget):
         self.ask = AskPanel()
         self.ask.jump_requested.connect(self.jump_to)
         self.side_stack.addWidget(self.ask)
+        self.steps = StepsPanel()
+        self.steps.seek_requested.connect(self._seek_to_step)
+        self.steps.make_requested.connect(self.make_steps)
+        self.steps.marked.connect(self._on_step_marked)
+        self.steps.replay_requested.connect(self._replay_step)
+        self.steps.checkpoint_closed.connect(self._on_checkpoint_closed)
+        self.step_maker = StepMaker(self)
+        self.step_maker.progress.connect(self._on_steps_progress)
+        self.step_maker.finished.connect(self._on_steps_ready)
+        self.step_maker.failed.connect(self._on_steps_failed)
+        self.side_stack.addWidget(self.steps)
         tabs = QHBoxLayout()
         tabs.setSpacing(8)
         self.side_tabs = QButtonGroup(self)
-        for index, name in enumerate(("Content", "Transcript", "Ask")):
+        for index, name in enumerate(("Content", "Transcript", "Ask", "Steps")):
             tab = QPushButton(name)
             tab.setCheckable(True)
             tab.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -335,6 +359,7 @@ class CourseView(QWidget):
         self.player.set_volume(int(db.get_state("volume", "80")))
         self.set_notes_visible(self._notes_visible)
         self.set_playlist_visible(self._playlist_visible)
+        self.set_study_mode(self._study_mode)
         self._update_info()
         self._setup_shortcuts()
 
@@ -434,6 +459,123 @@ class CourseView(QWidget):
         if self.current is not None and self.current.id == video_id:
             self.transcript.set_chapters_busy(None)
             QMessageBox.warning(self, "AI chapters", message)
+
+    # ---- study steps ----
+    def set_study_mode(self, on: bool) -> None:
+        self._study_mode = on
+        self.study_btn.blockSignals(True)
+        self.study_btn.setChecked(on)
+        self.study_btn.blockSignals(False)
+        self.db.set_state("study_mode", "1" if on else "0")
+        if on and self.current is not None:
+            self._show_steps_tab()
+
+    def _show_steps_tab(self) -> None:
+        self._select_side_tab(STEPS_TAB)
+        self.set_playlist_visible(True)
+        self._sync_transcript_btn()
+
+    def _load_steps(self) -> None:
+        video = self.current
+        data = load_steps(video.id) if video is not None else {"steps": [], "mantra": ""}
+        progress = self.db.step_progress(video.id) if video is not None and data["steps"] else {}
+        self.steps.set_steps(data["steps"], data["mantra"], progress)
+        self.player.set_steps([step["start_ms"] for step in data["steps"][1:]])
+        if video is not None and self.step_maker.busy_video == video.id:
+            self.steps.set_busy("Making steps...")
+        elif video is None or not has_transcript(video.id):
+            self.steps.set_can_make(False)
+
+    def make_steps(self) -> None:
+        video = self.current
+        if video is None or self.step_maker.busy_video is not None:
+            return
+        segments = load_transcript(video.id)
+        if not segments:
+            return
+        if not groq_client.load_settings()["api_key"]:
+            QMessageBox.information(self, "Groq API key needed", "Paste your Groq API key in Settings \u2192 "
+                                    "Transcripts first.")
+            return
+        self.steps.set_busy("Making steps...")
+        self.step_maker.start(video.id, segments)
+
+    def _on_steps_progress(self, video_id: int, text: str) -> None:
+        if self.current is not None and self.current.id == video_id:
+            self.steps.set_busy(text)
+
+    def _on_steps_ready(self, video_id: int, _data: dict) -> None:
+        self.db.clear_step_progress(video_id)  # new steps: the old step indexes no longer match
+        if self.current is not None and self.current.id == video_id:
+            self._asked_steps.clear()
+            self._load_steps()
+
+    def _on_steps_failed(self, video_id: int, message: str) -> None:
+        if self.current is not None and self.current.id == video_id:
+            self.steps.set_busy(None)
+            QMessageBox.warning(self, "Study steps", message)
+
+    def _step_end(self, index: int, length: int) -> float:
+        steps = self.steps.steps
+        if index + 1 < len(steps):
+            return steps[index + 1]["start_ms"]
+        if length <= 0:
+            return float("inf")
+        # The last check comes before the "Up next" card takes over the end of the lecture.
+        return max(steps[index]["start_ms"] + 1, length - UP_NEXT_LEAD_MS - 1000)
+
+    def _check_step_end(self, position: int, length: int) -> None:
+        previous, self._last_position = self._last_position, position
+        steps = self.steps.steps
+        if not steps:
+            return
+        if not self.steps.checkpoint_open():
+            self.steps.highlight(step_index_at(steps, position))
+        if previous is None:
+            return
+        if position < previous:  # seeked back: the steps ahead may be checked again
+            self._asked_steps = {i for i in self._asked_steps if self._step_end(i, length) <= position}
+            return
+        if not self._study_mode or self.steps.checkpoint_open() or position - previous > PLAY_JUMP_MS:
+            return
+        for index in range(len(steps)):
+            if index not in self._asked_steps and previous < self._step_end(index, length) <= position:
+                self._asked_steps.add(index)
+                self.open_checkpoint(index, pause=True)
+                return
+
+    def open_checkpoint(self, index: int, pause: bool = False) -> None:
+        self.exit_fullscreen()
+        if pause and self.player.is_playing():
+            self.player.toggle_play()
+            self._resume_after_check = True
+        self._show_steps_tab()
+        self.steps.show_checkpoint(index)
+
+    def _on_checkpoint_closed(self) -> None:
+        if self._resume_after_check:
+            self._resume_after_check = False
+            if not self.player.is_playing():
+                self.player.toggle_play()
+
+    def _seek_to_step(self, start_ms: int) -> None:
+        self._last_position = None  # a jump, not playback
+        self.player.seek(start_ms)
+
+    def _replay_step(self, index: int) -> None:
+        steps = self.steps.steps
+        if not 0 <= index < len(steps):
+            return
+        self.steps.card.hide()
+        self._resume_after_check = False
+        self._asked_steps.discard(index)
+        self._seek_to_step(steps[index]["start_ms"])
+        if not self.player.is_playing():
+            self.player.toggle_play()
+
+    def _on_step_marked(self, index: int, status: str, answer: str) -> None:
+        if self.current is not None:
+            self.db.set_step_progress(self.current.id, index, status, answer)
 
     def open_quiz(self, video: Video) -> None:
         if self.course is None:
@@ -540,6 +682,10 @@ class CourseView(QWidget):
         self._show_transcript_state()
         if not self.player.has_subtitle():
             self.player.add_subtitle(str(srt_path(video_id)))
+        self._load_steps()
+        settings = groq_client.load_settings()
+        if settings["auto"] and settings["api_key"] and not self.steps.steps:
+            self.make_steps()
 
     def _on_transcript_failed(self, video_id: int, message: str) -> None:
         if self.current is not None and self.current.id == video_id:
@@ -585,6 +731,7 @@ class CourseView(QWidget):
         self.tree.clear()
         self.notes.set_video(None)
         self._show_transcript_state()
+        self._load_steps()
         self._update_info()
 
     def shutdown(self) -> None:
@@ -593,6 +740,7 @@ class CourseView(QWidget):
         self.db.set_state("volume", str(self.player.volume()))
         self.notes.summarizer.shutdown()
         self.chapter_maker.shutdown()
+        self.step_maker.shutdown()
         self.player.release()
 
     def sync_course(self) -> None:
@@ -644,6 +792,9 @@ class CourseView(QWidget):
         self._up_next_dismissed = False
         self._next_prefetched = False
         self._resume_after_note = False
+        self._resume_after_check = False
+        self._asked_steps.clear()
+        self._last_position = None
         if not ensure_source(self, self.services, self.course.source):
             return
         try:
@@ -663,6 +814,7 @@ class CourseView(QWidget):
         self.notes.set_video(video.id)
         self.ask.set_lecture(video, [(v, number) for number, v in enumerate(self.videos, 1)])
         self._load_chapters()
+        self._load_steps()
         self._show_transcript_state()
         if (not has_transcript(video.id) and not self.transcripts.is_busy(video.id)
                 and (settings := groq_client.load_settings())["auto"] and settings["api_key"]):
@@ -699,6 +851,7 @@ class CourseView(QWidget):
         if not video.completed and position >= length - COMPLETE_TOLERANCE_MS:
             self._set_completed(video, True)
         self.transcript.set_position(position)
+        self._check_step_end(position, length)
         self._update_early_up_next(position, length)
         if not self._next_prefetched and (position >= length * 0.6 or length - position <= 120_000):
             self._next_prefetched = True

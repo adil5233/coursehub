@@ -55,7 +55,17 @@ CREATE TABLE IF NOT EXISTS reviews (
     last_score REAL,
     attempts INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS step_progress (
+    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    step_index INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    answer TEXT NOT NULL DEFAULT '',
+    score REAL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (video_id, step_index)
+);
 """
+STEP_STATUSES = ("done", "partial", "again")  # samajh gaya / thoda / nahi
 
 _VIDEO_COLUMNS = (
     "id, course_id, section, title, ref, sort_order, duration_ms, size, "
@@ -336,6 +346,29 @@ class Database:
             if course is not None:
                 result.append((course, video, dict(row)))
         return result
+
+    # ---- study steps ----
+    def step_progress(self, video_id: int) -> dict[int, str]:
+        """step index -> status for one lecture."""
+        rows = self.conn.execute("SELECT step_index, status FROM step_progress WHERE video_id = ?", (video_id,))
+        return {row["step_index"]: row["status"] for row in rows}
+
+    def set_step_progress(self, video_id: int, step_index: int, status: str, answer: str = "",
+                          score: float | None = None) -> None:
+        if status not in STEP_STATUSES:
+            raise ValueError(f"Unknown step status: {status}")
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO step_progress (video_id, step_index, status, answer, score) VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(video_id, step_index) DO UPDATE SET status = excluded.status,
+                   answer = excluded.answer, score = excluded.score, updated_at = CURRENT_TIMESTAMP""",
+                (video_id, step_index, status, answer, score),
+            )
+
+    def clear_step_progress(self, video_id: int) -> None:
+        """Steps were remade, so the old indexes no longer match."""
+        with self.conn:
+            self.conn.execute("DELETE FROM step_progress WHERE video_id = ?", (video_id,))
 
     # ---- app state ----
     def get_state(self, key: str, default: str | None = None) -> str | None:
