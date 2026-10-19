@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from concurrent.futures import Future
 from pathlib import Path
 
-from ..config import CACHE_DIR, TELEGRAM_CONFIG, TELEGRAM_SESSION
+from ..config import CACHE_DIR, TELEGRAM_CONFIG, TELEGRAM_SESSION, write_text_atomic
 from ..models import ScannedVideo
 from ..scanner.telegram_scanner import scan_channel
 
@@ -69,7 +69,7 @@ class TelegramService:
 
     @staticmethod
     def save_config(api_id: int, api_hash: str) -> None:
-        TELEGRAM_CONFIG.write_text(json.dumps({"api_id": api_id, "api_hash": api_hash}), encoding="utf-8")
+        write_text_atomic(TELEGRAM_CONFIG, json.dumps({"api_id": api_id, "api_hash": api_hash}))
 
     @staticmethod
     def clear_config() -> None:

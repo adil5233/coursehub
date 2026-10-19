@@ -5,6 +5,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
+from ..config import write_text_atomic
 from . import Segment, groq_client
 from .summary import PART_CHARS, Cancelled, ask
 
@@ -123,9 +124,7 @@ def load_chapters(video_id: int) -> list[dict]:
 
 
 def save_chapters(video_id: int, chapters: list[dict]) -> None:
-    path = _path(video_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(chapters, ensure_ascii=False), encoding="utf-8")
+    write_text_atomic(_path(video_id), json.dumps(chapters, ensure_ascii=False))
 
 
 class ChapterMaker(QObject):

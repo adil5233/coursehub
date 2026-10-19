@@ -1,10 +1,11 @@
 """Groq's hosted Whisper and chat models (OpenAI-compatible API) plus the user's Groq settings."""
 import json
+import threading
 from datetime import date
 
 import requests
 
-from ..config import GROQ_CONFIG
+from ..config import GROQ_CONFIG, write_text_atomic
 from . import Segment, split_segments
 
 API_URL = "https://api.groq.com/openai/v1"
@@ -12,6 +13,7 @@ MODEL = "whisper-large-v3"
 LANGUAGE = "en"
 # Whisper follows the prompt's style: Hinglish speech comes out as Indian English in Roman script.
 PROMPT = "A programming lecture in Hinglish (Hindi and English mixed), transcribed in Indian English, Roman script."
+_SETTINGS_LOCK = threading.RLock()  # the transcript thread adds usage while Settings may save the key
 CHAT_MODEL = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile is no longer offered on Groq
 
 
@@ -115,8 +117,8 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict) -> None:
-    GROQ_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    GROQ_CONFIG.write_text(json.dumps(settings), encoding="utf-8")
+    with _SETTINGS_LOCK:
+        write_text_atomic(GROQ_CONFIG, json.dumps(settings))
 
 
 def audio_seconds_today(settings: dict) -> float:
@@ -125,6 +127,7 @@ def audio_seconds_today(settings: dict) -> float:
 
 
 def add_usage(seconds: float) -> None:
-    settings = load_settings()
-    settings["usage"] = {"date": date.today().isoformat(), "seconds": audio_seconds_today(settings) + seconds}
-    save_settings(settings)
+    with _SETTINGS_LOCK:
+        settings = load_settings()
+        settings["usage"] = {"date": date.today().isoformat(), "seconds": audio_seconds_today(settings) + seconds}
+        save_settings(settings)

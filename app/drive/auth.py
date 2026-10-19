@@ -6,14 +6,14 @@ from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
-from ..config import DRIVE_CREDENTIALS, DRIVE_TOKEN
+from ..config import DRIVE_CREDENTIALS, DRIVE_TOKEN, write_text_atomic
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 LOGIN_TIMEOUT_S = 300
 
 
 def _save(creds: Credentials) -> None:
-    DRIVE_TOKEN.write_text(creds.to_json(), encoding="utf-8")
+    write_text_atomic(DRIVE_TOKEN, creds.to_json())
 
 
 def has_client_secrets() -> bool:

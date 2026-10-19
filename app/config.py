@@ -27,6 +27,14 @@ COMPLETE_TOLERANCE_MS = 1000
 SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write via a temp file + rename, so a crash mid-write never leaves a half-written file behind."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(text, encoding="utf-8")
+    temp.replace(path)
+
+
 def ensure_dirs() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)

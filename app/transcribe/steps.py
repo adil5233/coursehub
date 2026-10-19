@@ -4,6 +4,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
+from ..config import write_text_atomic
 from . import Segment, groq_client
 from .chapters import _ms, marked_parts
 from .summary import LANGUAGE_RULE, Cancelled, ask
@@ -135,11 +136,7 @@ def load_steps(video_id: int) -> dict:
 
 
 def save_steps(video_id: int, data: dict) -> None:
-    path = _path(video_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    temp.replace(path)
+    write_text_atomic(_path(video_id), json.dumps(data, ensure_ascii=False))
 
 
 class StepMaker(QObject):
