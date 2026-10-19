@@ -107,34 +107,37 @@ def timed_parts(segments: list[Segment], max_chars: int = PART_CHARS) -> list[tu
 
 def ask(api_key: str, prompt: str, max_tokens: int, report, cancel: threading.Event,
         system: str = SYSTEM_PROMPT) -> str:
-    """One Groq chat call. A model that hits its free limit (or was removed) hands over to the next one;
-    only when every model is limited does it wait (short limits) or fail (daily limits). Network errors retry."""
+    """One chat call. Groq's models go first, then OpenRouter's free models when a key is saved. A model that
+    hits its limit (or was removed) hands over to the next one; only when every model is limited does it wait
+    (short limits) or fail (daily limits). Network errors are retried."""
+    from . import providers
+
+    keys = {providers.GROQ: api_key, providers.OPENROUTER: groq_client.load_settings()["openrouter_key"]}
     messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
     failures = 0
     while True:
         if cancel.is_set():
             raise Cancelled()
-        model, wait = groq_client.pick_model()
-        if model is None:
+        entry, wait = providers.pick(keys)
+        if entry is None:
             if wait == float("inf"):
-                raise groq_client.GroqError("No Groq chat model is available for this API key.")
+                raise groq_client.GroqError("No AI model is available for the saved API keys.")
             if wait > MAX_WAIT_S:
-                raise groq_client.GroqError(f"Groq's free limit for today is used up on every model. "
-                                            f"Try again in about {math.ceil(wait / 60)} min.")
-            report(f"Waiting {math.ceil(wait)} s for the Groq free limit...")
+                backup = "" if keys[providers.OPENROUTER] else " Add a free OpenRouter key in Settings as a backup."
+                raise groq_client.GroqError(f"The free AI limit for today is used up on every model. "
+                                            f"Try again in about {math.ceil(wait / 60)} min.{backup}")
+            report(f"Waiting {math.ceil(wait)} s for the free AI limit...")
             if cancel.wait(max(1.0, wait)):
                 raise Cancelled() from None
             continue
         try:
-            return groq_client.chat(api_key, messages, max_tokens=max_tokens, model=model)
-        except groq_client.RateLimited as exc:
-            groq_client.cool_down(model, exc.retry_after)
-            following, _wait = groq_client.pick_model()
-            if following is not None:
-                report(f"{groq_client.short_name(model)} hit its free limit, switching to "
-                       f"{groq_client.short_name(following)}...")
-        except groq_client.ModelUnavailable:
-            groq_client.mark_gone(model)
+            return providers.chat(entry, keys, messages, max_tokens)
+        except groq_client.GroqError as exc:
+            if not providers.handle_failure(entry, exc):
+                raise
+            following, _wait = providers.pick(keys)
+            if isinstance(exc, groq_client.RateLimited) and following is not None:
+                report(f"{providers.label(entry)} hit its free limit, switching to {providers.label(following)}...")
         except requests.RequestException:
             failures += 1
             if failures > NETWORK_RETRIES:

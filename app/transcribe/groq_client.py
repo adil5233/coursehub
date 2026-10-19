@@ -12,6 +12,7 @@ from ..config import GROQ_CONFIG, write_text_atomic
 from . import Segment, split_segments
 
 API_URL = "https://api.groq.com/openai/v1"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
 MODEL = "whisper-large-v3"
 LANGUAGE = "en"
 # Whisper follows the prompt's style: Hinglish speech comes out as Indian English in Roman script.
@@ -42,10 +43,15 @@ class ModelUnavailable(GroqError):
     """The model was removed from Groq or is not available for this key."""
 
 
+class EmptyReply(GroqError):
+    """The model answered with no text (e.g. its hidden reasoning used up max_tokens)."""
+
+
 class RateLimited(GroqError):
-    def __init__(self, retry_after: float, message: str) -> None:
+    def __init__(self, retry_after: float, message: str, account_wide: bool = False) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+        self.account_wide = account_wide  # the whole account is limited (OpenRouter's daily free requests)
 
 
 def _error_message(resp: requests.Response) -> str:
@@ -63,7 +69,13 @@ def _raise_for_status(resp: requests.Response) -> None:
             retry_after = float(resp.headers.get("retry-after", "60"))
         except ValueError:
             retry_after = 60.0
-        raise RateLimited(retry_after, _error_message(resp))
+        reset = resp.headers.get("x-ratelimit-reset")  # OpenRouter's own limit: reset time in ms since epoch
+        if reset is not None:
+            try:
+                retry_after = max(1.0, float(reset) / 1000 - time.time())
+            except ValueError:
+                pass
+        raise RateLimited(retry_after, _error_message(resp), account_wide=reset is not None)
     if resp.status_code >= 400:
         message = _error_message(resp)
         if resp.status_code == 404 or (resp.status_code == 400 and "model" in message.lower()
@@ -102,60 +114,36 @@ def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout:
 
 
 def chat(api_key: str, messages: list[dict], max_tokens: int = 1500, temperature: float = 0.3,
-         timeout: float = 120, model: str = CHAT_MODEL) -> str:
+         timeout: float = 120, model: str = CHAT_MODEL, url: str = API_URL) -> str:
+    """One chat completion on Groq, or on any OpenAI-compatible API given its url (e.g. OpenRouter)."""
     body = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
-    if model.startswith("openai/gpt-oss"):
+    if model.startswith("openai/gpt-oss") and url == API_URL:
         body["reasoning_effort"] = "low"  # its hidden thinking also counts against the free token limits
     resp = requests.post(
-        f"{API_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}"},
+        f"{url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "X-Title": "CourseHub"},
         json=body,
         timeout=timeout,
     )
     _raise_for_status(resp)
     try:
-        content = str(resp.json()["choices"][0]["message"]["content"])
+        content = resp.json()["choices"][0]["message"]["content"] or ""
     except (ValueError, KeyError, IndexError, TypeError) as exc:
-        raise GroqError("Groq sent an unexpected reply.") from exc
-    return _THINK.sub("", content).strip()
+        raise GroqError("The AI service sent an unexpected reply.") from exc
+    text = _THINK.sub("", str(content)).strip()
+    if not text:
+        raise EmptyReply(f"{model} sent an empty reply.")
+    return text
 
 
-# ---- which model to use: skip the ones whose free limit ran out or that Groq removed ----
-_models_lock = threading.Lock()
-_cooldown: dict[str, float] = {}  # model -> time.monotonic() when its limit resets
-_gone: set[str] = set()
+def check_openrouter_key(api_key: str) -> None:
+    """Raises InvalidKey / GroqError when OpenRouter does not accept the key."""
+    resp = requests.get(f"{OPENROUTER_URL}/key", headers={"Authorization": f"Bearer {api_key}"}, timeout=20)
+    if resp.status_code == 401:
+        raise InvalidKey("OpenRouter rejected the API key.")
+    if resp.status_code >= 400:
+        raise GroqError(f"OpenRouter error {resp.status_code}: {_error_message(resp)}")
 
-
-def pick_model(models: tuple[str, ...] = CHAT_MODELS) -> tuple[str | None, float]:
-    """(first model that can be used now, 0) or (None, seconds until the first one is free again)."""
-    now = time.monotonic()
-    with _models_lock:
-        usable = [m for m in models if m not in _gone]
-        for model in usable:
-            if _cooldown.get(model, 0) <= now:
-                return model, 0.0
-        waits = [_cooldown[m] - now for m in usable]
-    return None, (min(waits) if waits else float("inf"))
-
-
-def cool_down(model: str, seconds: float) -> None:
-    with _models_lock:
-        _cooldown[model] = time.monotonic() + max(1.0, seconds)
-
-
-def mark_gone(model: str) -> None:
-    with _models_lock:
-        _gone.add(model)
-
-
-def reset_models() -> None:
-    with _models_lock:
-        _cooldown.clear()
-        _gone.clear()
-
-
-def short_name(model: str) -> str:
-    return model.rsplit("/", 1)[-1]
 
 def check_key(api_key: str) -> None:
     """Raises InvalidKey / GroqError when the key cannot be used."""
@@ -173,7 +161,7 @@ def load_settings() -> dict:
     except (OSError, ValueError):
         data = {}
     return {"api_key": str(data.get("api_key", "")), "auto": bool(data.get("auto", False)),
-            "usage": data.get("usage") or {}}
+            "usage": data.get("usage") or {}, "openrouter_key": str(data.get("openrouter_key", ""))}
 
 
 def save_settings(settings: dict) -> None:

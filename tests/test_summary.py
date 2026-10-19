@@ -56,7 +56,7 @@ def test_transcript_parts_keep_order_and_size():
 
 def test_short_lecture_is_one_call(monkeypatch):
     calls = []
-    monkeypatch.setattr(groq_client, "chat", lambda key, messages, max_tokens, model: calls.append(messages) or "Note")
+    monkeypatch.setattr(groq_client, "chat", lambda key, messages, max_tokens, model, url: calls.append(messages) or "Note")
     assert summary.summarize("key", segments(10)) == "Note"
     assert len(calls) == 1 and "Hinglish" in calls[0][0]["content"] and "Transcript:" in calls[0][1]["content"]
 
@@ -71,7 +71,7 @@ def test_long_lecture_is_map_reduce_and_waits_for_rate_limit(monkeypatch):
     prompts, statuses = [], []
     limited = {"once": True}
 
-    def fake_chat(key, messages, max_tokens, model):
+    def fake_chat(key, messages, max_tokens, model, url):
         if limited.pop("once", False):
             raise groq_client.RateLimited(0.01, "slow down")
         prompts.append(messages[1]["content"])

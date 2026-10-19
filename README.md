@@ -39,6 +39,9 @@ To stay inside Groq's free limits:
 - **Study pack**: steps, chapters and quiz questions come from one read of the transcript, made once per lecture.
 - **Model fallback**: Groq's limits are per model, so when one model hits its limit the next one takes over
   (gpt-oss-120b → llama-3.3-70b → gpt-oss-20b → qwen3.8-27b → llama-3.1-8b-instant).
+- **OpenRouter backup** (optional): add a free [OpenRouter key](https://openrouter.ai/keys) in Settings and its
+  free models take over when every Groq model is at its limit (about 50 requests a day without credits).
+  Transcripts still need Groq.
 
 | Feature | What it does |
 | --- | --- |

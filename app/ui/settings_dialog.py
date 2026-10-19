@@ -28,8 +28,7 @@ class SettingsDialog(QDialog):
             "Clearing it frees disk space; everything simply downloads again when needed.\n"
             "Your courses, progress, notes and logins are NOT affected."
         )
-        info.setObjectName("Muted")
-        info.setWordWrap(True)
+        info.setObjectName("Muted")  # no word wrap: wrapped labels make Qt size this dialog too short
         path = QLabel(str(CACHE_DIR))
         path.setObjectName("Muted")
 
@@ -78,7 +77,6 @@ class SettingsDialog(QDialog):
         info.setTextFormat(Qt.TextFormat.RichText)
         info.setOpenExternalLinks(True)
         info.setObjectName("Muted")
-        info.setWordWrap(True)
 
         self.key_edit = QLineEdit(settings["api_key"])
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -108,6 +106,32 @@ class SettingsDialog(QDialog):
         card_layout.addLayout(key_row)
         card_layout.addWidget(self.auto_check)
         card_layout.addWidget(usage)
+
+        # Lines are broken by hand like the Storage text (word wrap makes Qt size the dialog too short).
+        backup_info = QLabel("Backup AI (optional): when every Groq model has used up its free limit,\n"
+                             "steps, quizzes and answers continue on OpenRouter's free models\n"
+                             "(about 50 requests a day).")
+        backup_info.setObjectName("Muted")
+        backup_links = QLabel(
+            'Free key: <a href="https://openrouter.ai/keys">openrouter.ai/keys</a>  •  Requests fail? '
+            '<a href="https://openrouter.ai/settings/privacy">Allow free models</a>'
+        )
+        backup_links.setTextFormat(Qt.TextFormat.RichText)
+        backup_links.setOpenExternalLinks(True)
+        backup_links.setObjectName("Muted")
+        self.openrouter_edit = QLineEdit(settings["openrouter_key"])
+        self.openrouter_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.openrouter_edit.setPlaceholderText("sk-or-...")
+        self.openrouter_edit.editingFinished.connect(self._save_groq)
+        openrouter_test = QPushButton("Save && test")
+        openrouter_test.clicked.connect(self._test_openrouter_key)
+        openrouter_row = QHBoxLayout()
+        openrouter_row.addWidget(self.openrouter_edit, 1)
+        openrouter_row.addWidget(openrouter_test)
+        card_layout.addSpacing(6)
+        card_layout.addWidget(backup_info)
+        card_layout.addWidget(backup_links)
+        card_layout.addLayout(openrouter_row)
         outer.addWidget(title)
         outer.addWidget(card)
         return section
@@ -116,6 +140,7 @@ class SettingsDialog(QDialog):
         settings = groq_client.load_settings()
         settings["api_key"] = self.key_edit.text().strip()
         settings["auto"] = self.auto_check.isChecked()
+        settings["openrouter_key"] = self.openrouter_edit.text().strip()
         groq_client.save_settings(settings)
 
     def _test_key(self) -> None:
@@ -130,6 +155,20 @@ class SettingsDialog(QDialog):
             show_error(self, "Groq API key", exc)
             return
         QMessageBox.information(self, "Groq API key", "Key works. Transcripts are ready to use.")
+
+    def _test_openrouter_key(self) -> None:
+        self._save_groq()
+        key = self.openrouter_edit.text().strip()
+        if not key:
+            QMessageBox.warning(self, "OpenRouter API key", "Paste your OpenRouter API key first.")
+            return
+        try:
+            run_with_progress(self, "Checking the key with OpenRouter...", groq_client.check_openrouter_key, key)
+        except Exception as exc:
+            show_error(self, "OpenRouter API key", exc)
+            return
+        QMessageBox.information(self, "OpenRouter API key",
+                                "Key works. OpenRouter's free models will take over when Groq's limit runs out.")
 
     def _refresh(self) -> None:
         size = self.services.cache_size()
