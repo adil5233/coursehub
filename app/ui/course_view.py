@@ -10,14 +10,18 @@ from ..config import (
 )
 from ..models import Course, Video
 from ..player.vlc_widget import SEEK_STEP_MS, VOLUME_STEP, VideoPlayer, glyph_icon
+from ..review import FIRST_INTERVAL, due_after
 from ..transcribe import groq_client, has_transcript, load_transcript, srt_path
+from ..transcribe.chapters import ChapterMaker, load_chapters
 from ..transcribe.summary import NoteSummarizer
+from .ask_panel import AskPanel
 from .notes_panel import NotesPanel
+from .quiz_dialog import QuizDialog
 from .remote import ensure_source, scan_source
 from .theme import ACCENT
 from .thumbnails import cover_pixmap, load_thumb
 from .transcript_panel import TranscriptPanel
-from .utils import show_error
+from .utils import export_course_notes, show_error
 
 VIDEO_ID = Qt.ItemDataRole.UserRole
 NOTES_MAX_SHARE = 0.5  # the notes panel never takes more than half of the left column
@@ -85,6 +89,7 @@ def _thin_bar(width: int | None = None) -> QProgressBar:
 
 class CourseView(QWidget):
     back_requested = Signal()
+    search_requested = Signal()
 
     def __init__(self, db, services, thumbnails, transcripts, parent=None) -> None:
         super().__init__(parent)
@@ -107,6 +112,7 @@ class CourseView(QWidget):
         self._up_next_dismissed = False
         self._next_prefetched = False
         self._was_maximized = False
+        self._resume_after_note = False
         self._notes_visible = db.get_state("notes_visible", "1") == "1"
         self._playlist_visible = db.get_state("playlist_visible", "1") == "1"
         self._panel_was_visible = True  # side panel state before the Transcript button opened it
@@ -131,6 +137,11 @@ class CourseView(QWidget):
         top.addWidget(back_button)
         top.addWidget(self.course_label, 1)
         top.addWidget(sync_button)
+        search_button = QPushButton("Search")
+        search_button.setToolTip("Search every note and transcript (Ctrl+K)")
+        search_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        search_button.clicked.connect(lambda: self.search_requested.emit())
+        top.addWidget(search_button)
         top.addWidget(self.progress_label)
         top.addWidget(self.progress_bar)
 
@@ -162,7 +173,7 @@ class CourseView(QWidget):
         self.complete_btn.clicked.connect(self._toggle_current_complete)
         self.notes_btn = QPushButton("Notes")
         self.notes_btn.setCheckable(True)
-        self.notes_btn.setToolTip("Show / hide notes")
+        self.notes_btn.setToolTip("Show / hide notes (Ctrl+N: quick note at the current time)")
         self.notes_btn.toggled.connect(self.set_notes_visible)
         self.playlist_btn = QPushButton("Playlist")
         self.playlist_btn.setCheckable(True)
@@ -172,8 +183,11 @@ class CourseView(QWidget):
         self.transcript_btn.setCheckable(True)
         self.transcript_btn.setToolTip("Show / hide the transcript of this lecture")
         self.transcript_btn.toggled.connect(self.set_transcript_visible)
+        self.quiz_btn = QPushButton("Quiz")
+        self.quiz_btn.setToolTip("Revision quiz for this lecture (made from its transcript)")
+        self.quiz_btn.clicked.connect(lambda: self.current is not None and self.open_quiz(self.current))
         for button in (self.prev_btn, self.next_btn, self.complete_btn, self.notes_btn, self.playlist_btn,
-                       self.transcript_btn):
+                       self.transcript_btn, self.quiz_btn):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         actions = QHBoxLayout()
@@ -181,6 +195,7 @@ class CourseView(QWidget):
         for button in (self.prev_btn, self.next_btn, self.complete_btn):
             actions.addWidget(button)
         actions.addStretch(1)
+        actions.addWidget(self.quiz_btn)
         actions.addWidget(self.transcript_btn)
         actions.addWidget(self.notes_btn)
         actions.addWidget(self.playlist_btn)
@@ -205,6 +220,9 @@ class CourseView(QWidget):
 
         self.notes = NotesPanel(db, self.player.time, NoteSummarizer(self))
         self.notes.seek_requested.connect(self.player.seek)
+        self.notes.note_added.connect(self._after_quick_note)
+        self.notes.export_requested.connect(
+            lambda: self.course is not None and export_course_notes(self, self.db, self.course))
         self.notes.hide_requested.connect(lambda: self.set_notes_visible(False))
         self.notes.content_height_changed.connect(self._fit_notes)
 
@@ -255,14 +273,22 @@ class CourseView(QWidget):
         self.transcript.generate_requested.connect(lambda: self.transcribe(self.current, front=True))
         self.transcript.cancel_requested.connect(
             lambda: self.current is not None and self.transcripts.cancel(self.current.id))
+        self.transcript.chapters_requested.connect(self.make_chapters)
+        self.chapter_maker = ChapterMaker(self)
+        self.chapter_maker.progress.connect(self._on_chapters_progress)
+        self.chapter_maker.finished.connect(self._on_chapters_ready)
+        self.chapter_maker.failed.connect(self._on_chapters_failed)
 
         self.side_stack = QStackedWidget()
         self.side_stack.addWidget(content_page)
         self.side_stack.addWidget(self.transcript)
+        self.ask = AskPanel()
+        self.ask.jump_requested.connect(self.jump_to)
+        self.side_stack.addWidget(self.ask)
         tabs = QHBoxLayout()
         tabs.setSpacing(8)
         self.side_tabs = QButtonGroup(self)
-        for index, name in enumerate(("Content", "Transcript")):
+        for index, name in enumerate(("Content", "Transcript", "Ask")):
             tab = QPushButton(name)
             tab.setCheckable(True)
             tab.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -327,6 +353,7 @@ class CourseView(QWidget):
             "T": lambda: self.set_playlist_visible(not self._playlist_visible),
             "M": self.player.toggle_mute,
             "[": lambda: self.player.change_rate(-1),
+            "Ctrl+N": self.quick_note,
             "]": lambda: self.player.change_rate(1),
         }
         for key, slot in bindings.items():
@@ -372,6 +399,79 @@ class CourseView(QWidget):
 
     def show_transcript(self) -> None:
         self.set_transcript_visible(True)
+
+    # ---- chapters ----
+    def _load_chapters(self) -> None:
+        chapters = load_chapters(self.current.id) if self.current is not None else []
+        self.player.set_chapters(chapters)
+        self.transcript.set_chapters(chapters)
+        busy = self.current is not None and self.chapter_maker.busy_video == self.current.id
+        self.transcript.set_chapters_busy("Making chapters..." if busy else None)
+
+    def make_chapters(self) -> None:
+        video = self.current
+        if video is None or self.chapter_maker.busy_video is not None:
+            return
+        segments = load_transcript(video.id)
+        if not segments:
+            return
+        if not groq_client.load_settings()["api_key"]:
+            QMessageBox.information(self, "Groq API key needed", "Paste your Groq API key in Settings \u2192 "
+                                    "Transcripts first.")
+            return
+        self.transcript.set_chapters_busy("Making chapters...")
+        self.chapter_maker.start(video.id, segments)
+
+    def _on_chapters_progress(self, video_id: int, text: str) -> None:
+        if self.current is not None and self.current.id == video_id:
+            self.transcript.set_chapters_busy(text)
+
+    def _on_chapters_ready(self, video_id: int, _chapters: list) -> None:
+        if self.current is not None and self.current.id == video_id:
+            self._load_chapters()
+
+    def _on_chapters_failed(self, video_id: int, message: str) -> None:
+        if self.current is not None and self.current.id == video_id:
+            self.transcript.set_chapters_busy(None)
+            QMessageBox.warning(self, "AI chapters", message)
+
+    def open_quiz(self, video: Video) -> None:
+        if self.course is None:
+            return
+        self.exit_fullscreen()
+        if self.player.is_playing():
+            self.player.toggle_play()
+        dialog = QuizDialog(self.db, self.course, video, self)
+        dialog.jump_requested.connect(lambda _course, video_id, ms: self.jump_to(video_id, ms))
+        dialog.exec()
+        dialog.deleteLater()
+
+    def jump_to(self, video_id: int, time_ms: int) -> None:
+        """Play a lecture of this course from time_ms (search results, etc.)."""
+        if self.current is not None and self.current.id == video_id and self.player.has_media():
+            self.player.seek(time_ms)
+            return
+        video = self._video(video_id)
+        if video is not None:
+            video.last_position_ms = time_ms
+            self.play_video(video_id, True)
+
+    def quick_note(self) -> None:
+        """Ctrl+N: pause, open the notes and type; playback resumes once the note is added."""
+        if self.current is None:
+            return
+        self.exit_fullscreen()
+        self.set_notes_visible(True)
+        if self.player.is_playing():
+            self.player.toggle_play()
+            self._resume_after_note = True
+        self.notes.focus_input()
+
+    def _after_quick_note(self) -> None:
+        if self._resume_after_note:
+            self._resume_after_note = False
+            if not self.player.is_playing():
+                self.player.toggle_play()
 
     def set_transcript_visible(self, visible: bool) -> None:
         """Toggle the Transcript tab; closing it restores the side panel as it was before."""
@@ -492,6 +592,7 @@ class CourseView(QWidget):
         self.db.set_state("speed", str(self.player.rate()))
         self.db.set_state("volume", str(self.player.volume()))
         self.notes.summarizer.shutdown()
+        self.chapter_maker.shutdown()
         self.player.release()
 
     def sync_course(self) -> None:
@@ -542,6 +643,7 @@ class CourseView(QWidget):
         self._cancel_up_next()
         self._up_next_dismissed = False
         self._next_prefetched = False
+        self._resume_after_note = False
         if not ensure_source(self, self.services, self.course.source):
             return
         try:
@@ -559,6 +661,8 @@ class CourseView(QWidget):
         self.db.set_last_video(self.course.id, video.id)
         self.course.last_video_id = video.id
         self.notes.set_video(video.id)
+        self.ask.set_lecture(video, [(v, number) for number, v in enumerate(self.videos, 1)])
+        self._load_chapters()
         self._show_transcript_state()
         if (not has_transcript(video.id) and not self.transcripts.is_busy(video.id)
                 and (settings := groq_client.load_settings())["auto"] and settings["api_key"]):
@@ -651,7 +755,7 @@ class CourseView(QWidget):
     def _update_info(self) -> None:
         video = self.current
         has_video = video is not None
-        for button in (self.complete_btn, self.notes_btn, self.transcript_btn):
+        for button in (self.complete_btn, self.notes_btn, self.transcript_btn, self.quiz_btn):
             button.setEnabled(has_video)
         if not has_video:
             self.video_title.clear()
@@ -769,6 +873,7 @@ class CourseView(QWidget):
         video.completed = completed
         if completed:
             video.last_position_ms = 0
+            self.db.ensure_review(video.id, due_after(FIRST_INTERVAL))
         self._style_item(video)
         self._update_sections()
         self._update_progress()

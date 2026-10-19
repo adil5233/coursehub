@@ -65,8 +65,31 @@ def transcript_parts(segments: list[Segment], max_chars: int = PART_CHARS) -> li
     return parts
 
 
-def _ask(api_key: str, prompt: str, max_tokens: int, report, cancel: threading.Event) -> str:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+def timed_parts(segments: list[Segment], max_chars: int = PART_CHARS) -> list[tuple[int, str]]:
+    """Like transcript_parts, but each piece comes with its start time in ms."""
+    parts: list[tuple[int, str]] = []
+    current: list[str] = []
+    start_ms = size = 0
+    for segment in segments:
+        text = segment.text.strip()
+        if not text:
+            continue
+        if current and size + len(text) + 1 > max_chars:
+            parts.append((start_ms, " ".join(current)))
+            current, size = [], 0
+        if not current:
+            start_ms = int(segment.start * 1000)
+        current.append(text)
+        size += len(text) + 1
+    if current:
+        parts.append((start_ms, " ".join(current)))
+    return parts
+
+
+def ask(api_key: str, prompt: str, max_tokens: int, report, cancel: threading.Event,
+        system: str = SYSTEM_PROMPT) -> str:
+    """One Groq chat call that waits out the free per-minute limits and retries network errors."""
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
     failures = 0
     while True:
         if cancel.is_set():
@@ -108,15 +131,15 @@ def summarize(api_key: str, segments: list[Segment], report=lambda _text: None,
         raise groq_client.GroqError("The transcript is empty.")
     if len(parts) == 1:
         report("Writing the summary...")
-        return _clean(_ask(api_key, SINGLE_PROMPT.format(format=NOTE_FORMAT, text=parts[0]), 2000, report, cancel))
+        return _clean(ask(api_key, SINGLE_PROMPT.format(format=NOTE_FORMAT, text=parts[0]), 2000, report, cancel))
     part_notes = []
     for index, part in enumerate(parts, 1):
         report(f"Reading part {index} of {len(parts)}...")
         prompt = PART_PROMPT.format(index=index, total=len(parts), text=part)
-        part_notes.append(_ask(api_key, prompt, 1200, report, cancel))
+        part_notes.append(ask(api_key, prompt, 1200, report, cancel))
     report("Writing the summary...")
     joined = "\n\n".join(f"Hissa {i}:\n{notes}" for i, notes in enumerate(part_notes, 1))
-    return _clean(_ask(api_key, COMBINE_PROMPT.format(format=NOTE_FORMAT, text=joined), 2000, report, cancel))
+    return _clean(ask(api_key, COMBINE_PROMPT.format(format=NOTE_FORMAT, text=joined), 2000, report, cancel))
 
 
 class NoteSummarizer(QObject):

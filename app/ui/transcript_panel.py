@@ -30,6 +30,7 @@ class TranscriptPanel(QFrame):
     seek_requested = Signal(int)
     generate_requested = Signal()
     cancel_requested = Signal()
+    chapters_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -70,9 +71,26 @@ class TranscriptPanel(QFrame):
         copy_menu.addAction("Copy text", lambda: self._copy(timestamps=False))
         copy_menu.addAction("Copy with timestamps", lambda: self._copy(timestamps=True))
         self.copy_button.setMenu(copy_menu)
+        self.chapters_button = QPushButton("AI chapters")
+        self.chapters_button.setToolTip("Split this lecture into topics, shown on the seek bar (Groq)")
+        self.chapters_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chapters_button.clicked.connect(lambda: self.chapters_requested.emit())
         search_row = QHBoxLayout()
         search_row.addWidget(self.search, 1)
+        search_row.addWidget(self.chapters_button)
         search_row.addWidget(self.copy_button)
+
+        self.chapter_status = QLabel()
+        self.chapter_status.setObjectName("Muted")
+        self.chapter_status.hide()
+        self.chapter_list = QListWidget()
+        self.chapter_list.setObjectName("ChapterList")
+        self.chapter_list.setMaximumHeight(170)
+        self.chapter_list.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chapter_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.chapter_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.chapter_list.itemClicked.connect(lambda item: self.seek_requested.emit(int(item.data(START_MS))))
+        self.chapter_list.hide()
 
         self.list = QListWidget()
         self.list.setWordWrap(True)
@@ -91,6 +109,8 @@ class TranscriptPanel(QFrame):
         layout.addLayout(buttons)
         layout.addWidget(self.progress)
         layout.addLayout(search_row)
+        layout.addWidget(self.chapter_status)
+        layout.addWidget(self.chapter_list)
         layout.addWidget(self.list, 1)
         layout.addStretch(0)  # keeps status + buttons at the top while the list is hidden
         self.show_idle("Select a lecture to see its transcript.", can_generate=False)
@@ -130,6 +150,8 @@ class TranscriptPanel(QFrame):
         has_lines = bool(segments)
         self.search.setVisible(has_lines)
         self.copy_button.setVisible(has_lines)
+        self.chapters_button.setVisible(has_lines)
+        self.chapter_list.setVisible(has_lines and self.chapter_list.count() > 0)
         self.list.setVisible(has_lines)
         for segment in segments or []:
             start_ms = int(segment.start * 1000)
@@ -139,6 +161,22 @@ class TranscriptPanel(QFrame):
             self._starts.append(start_ms)
         if self.search.text():
             self._filter(self.search.text())
+
+    # ---- chapters ----
+    def set_chapters(self, chapters: list[dict]) -> None:
+        self.chapter_list.clear()
+        for chapter in chapters:
+            item = QListWidgetItem(f"{format_ms(chapter['start_ms'])}    {chapter['title']}")
+            item.setData(START_MS, chapter["start_ms"])
+            self.chapter_list.addItem(item)
+        self.chapter_list.setVisible(bool(chapters) and self.list.isVisibleTo(self))
+        self.chapters_button.setText("Remake chapters" if chapters else "AI chapters")
+
+    def set_chapters_busy(self, text: str | None) -> None:
+        """text: progress while chapters are being made; None when done."""
+        self.chapters_button.setEnabled(text is None)
+        self.chapter_status.setText(text or "")
+        self.chapter_status.setVisible(bool(text))
 
     # ---- copy ----
     def transcript_text(self, timestamps: bool) -> str:

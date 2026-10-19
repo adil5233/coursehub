@@ -1,8 +1,11 @@
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 
 from PySide6.QtCore import QEventLoop, QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressDialog, QWidget
+
+from ..notes_export import notes_markdown
 
 
 class _Finished(QObject):
@@ -57,3 +60,20 @@ def wait_cursor():
         yield
     finally:
         QApplication.restoreOverrideCursor()
+
+
+def export_course_notes(parent: QWidget | None, db, course) -> None:
+    """Ask where to save, then write every note of the course as one Markdown file."""
+    numbers = {video.id: index for index, video in enumerate(db.get_videos(course.id), 1)}
+    safe_name = "".join(c for c in course.name if c not in '<>:"/\\|?*').strip() or "course"
+    default = Path.home() / "Documents" / f"{safe_name} - notes.md"
+    path, _ = QFileDialog.getSaveFileName(parent, "Export notes", str(default), "Markdown (*.md);;Text (*.txt)")
+    if not path:
+        return
+    items = db.course_notes(course.id)
+    try:
+        Path(path).write_text(notes_markdown(course.name, items, numbers), encoding="utf-8")
+    except OSError as exc:
+        show_error(parent, "Export notes", exc)
+        return
+    QMessageBox.information(parent, "Export notes", f"Saved {len(items)} note(s) to:\n{path}")

@@ -146,10 +146,14 @@ class SeekPreviewCard(QFrame):
         self.image.setFixedSize(PREVIEW_W, PREVIEW_H)
         self.time = QLabel()
         self.time.setObjectName("SeekPreviewTime")
+        self.chapter = QLabel()
+        self.chapter.setObjectName("SeekPreviewTime")
+        self.chapter.hide()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(self.image)
+        layout.addWidget(self.chapter, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(self.time, 0, Qt.AlignmentFlag.AlignHCenter)
         self._has_image = False
         self.set_image(None)
@@ -187,6 +191,10 @@ class SeekPreviewCard(QFrame):
         pixmap.setDevicePixelRatio(ratio)
         self.image.setPixmap(pixmap)
         self._has_image = self._has_image or image is not None
+
+    def set_chapter(self, title: str) -> None:
+        self.chapter.setText(title if len(title) <= 34 else title[:33] + "\u2026")
+        self.chapter.setVisible(bool(title))
 
     def clear_image(self) -> None:
         self._has_image = False

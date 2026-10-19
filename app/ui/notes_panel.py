@@ -237,6 +237,8 @@ class NoteCard(QFrame):
 class NotesPanel(QFrame):
     seek_requested = Signal(int)
     hide_requested = Signal()
+    note_added = Signal()
+    export_requested = Signal()
     content_height_changed = Signal()  # preferred_height() changed: the parent may resize the panel
 
     def __init__(self, db, time_provider, summarizer=None, parent=None) -> None:
@@ -269,12 +271,18 @@ class NotesPanel(QFrame):
         self.ai_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.ai_button.clicked.connect(self._generate_summary)
         self.ai_button.setVisible(summarizer is not None)
+        export_button = QPushButton("Export")
+        export_button.setObjectName("Ghost")
+        export_button.setToolTip("Save every note of this course as one Markdown file")
+        export_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        export_button.clicked.connect(lambda: self.export_requested.emit())
         header = QHBoxLayout()
         header.addWidget(title)
         header.addWidget(self.count_label)
         header.addStretch(1)
         header.addWidget(self.ai_status)
         header.addWidget(self.ai_button)
+        header.addWidget(export_button)
         header.addWidget(hide_button)
         if summarizer is not None:
             summarizer.progress.connect(self._on_summary_progress)
@@ -282,8 +290,8 @@ class NotesPanel(QFrame):
             summarizer.failed.connect(self._on_summary_failed)
 
         self.input = _NoteInput()
-        self.input.setPlaceholderText("Write a note at the current time... (Enter to add, Shift+Enter for a new line, "
-                                      "</> for a code block)")
+        self.input.setPlaceholderText("Write a note at the current time... (Ctrl+N from anywhere, Enter to add, "
+                                      "Shift+Enter for a new line, </> for a code block)")
         self.input.submitted.connect(self._add)
         self.input.document().documentLayout().documentSizeChanged.connect(lambda _size: self._fit_timer.start())
         code_button = QPushButton("</>")
@@ -435,6 +443,10 @@ class NotesPanel(QFrame):
         note_id = self.db.add_note(self.video_id, self._time(), text)
         self.input.clear()
         self._reload(scroll_to=note_id)
+        self.note_added.emit()
+
+    def focus_input(self) -> None:
+        self.input.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
     def _edit(self, note_id: int, text: str) -> None:
         new_text, ok = QInputDialog.getMultiLineText(self, "Edit note", "Note:", text)

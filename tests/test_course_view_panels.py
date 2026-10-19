@@ -105,3 +105,35 @@ def test_notes_panel_grows_with_its_notes(app):
     view.player.release()
     view.close()
 
+
+def test_quick_note_pauses_and_resumes_after_the_note(app, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.player.vlc_widget import VideoPlayer
+    from tests.test_notes_panel import FakeDb as NotesDb
+
+    state = {"playing": True, "toggles": 0}
+
+    def toggle(_player):
+        state["playing"] = not state["playing"]
+        state["toggles"] += 1
+
+    monkeypatch.setattr(VideoPlayer, "is_playing", lambda _player: state["playing"])
+    monkeypatch.setattr(VideoPlayer, "toggle_play", toggle)
+    view = make_view("1")
+    view.notes.db = NotesDb()
+    view.current = SimpleNamespace(id=1)
+    view.notes.set_video(1)
+    view.set_notes_visible(False)
+
+    view.quick_note()
+    assert view._notes_visible and not state["playing"]
+    view.notes.input.setPlainText("yaad rakhna")
+    view.notes._add()
+    assert state["playing"] and state["toggles"] == 2
+    view.notes.input.setPlainText("normal note")
+    view.notes._add()
+    assert state["toggles"] == 2  # only a quick note resumes playback
+    view.current = None
+    view.player.release()
+    view.close()

@@ -1,4 +1,6 @@
+import json
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 from .models import Course, CourseStats, Note, ScannedVideo, Video
@@ -41,6 +43,18 @@ CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS quizzes (
+    video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+    questions TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS reviews (
+    video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+    due_date TEXT NOT NULL,
+    interval_days REAL NOT NULL DEFAULT 1,
+    last_score REAL,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
 """
 
 _VIDEO_COLUMNS = (
@@ -66,6 +80,13 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(courses)")}
+        if "last_watched_at" not in columns:
+            with self.conn:
+                self.conn.execute("ALTER TABLE courses ADD COLUMN last_watched_at TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -142,7 +163,32 @@ class Database:
 
     def set_last_video(self, course_id: int, video_id: int) -> None:
         with self.conn:
-            self.conn.execute("UPDATE courses SET last_video_id = ? WHERE id = ?", (video_id, course_id))
+            self.conn.execute(
+                "UPDATE courses SET last_video_id = ?, last_watched_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (video_id, course_id),
+            )
+
+    def continue_watching(self, limit: int = 8) -> list[tuple[Course, Video]]:
+        """Recently watched courses with the lecture to resume (the next one if the last was finished)."""
+        rows = self.conn.execute(
+            """SELECT * FROM courses WHERE last_video_id IS NOT NULL
+               ORDER BY last_watched_at IS NULL, last_watched_at DESC, id DESC"""
+        ).fetchall()
+        result: list[tuple[Course, Video]] = []
+        for row in rows:
+            course = _course(row)
+            videos = self.get_videos(course.id)
+            index = next((i for i, v in enumerate(videos) if v.id == course.last_video_id), None)
+            if index is None:
+                continue
+            video = videos[index]
+            if video.completed:
+                video = next((v for v in videos[index + 1:] + videos[:index] if not v.completed), None)
+            if video is not None:
+                result.append((course, video))
+            if len(result) >= limit:
+                break
+        return result
 
     def course_stats(self, course_id: int) -> CourseStats:
         row = self.conn.execute(
@@ -171,6 +217,11 @@ class Database:
     def save_position(self, video_id: int, position_ms: int) -> None:
         with self.conn:
             self.conn.execute("UPDATE videos SET last_position_ms = ? WHERE id = ?", (int(position_ms), video_id))
+            self.conn.execute(
+                "UPDATE courses SET last_watched_at = CURRENT_TIMESTAMP "
+                "WHERE id = (SELECT course_id FROM videos WHERE id = ?)",
+                (video_id,),
+            )
 
     def set_duration(self, video_id: int, duration_ms: int) -> None:
         with self.conn:
@@ -210,6 +261,81 @@ class Database:
     def delete_note(self, note_id: int) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+
+    def course_notes(self, course_id: int) -> list[tuple[Video, Note]]:
+        """Every note of a course, in lecture order then time order."""
+        rows = self.conn.execute(
+            f"""SELECT {', '.join('v.' + c.strip() for c in _VIDEO_COLUMNS.split(','))},
+                       n.id AS note_id, n.timestamp_ms, n.text
+                FROM notes n JOIN videos v ON v.id = n.video_id
+                WHERE v.course_id = ? AND v.missing = 0
+                ORDER BY v.sort_order, n.timestamp_ms, n.id""",
+            (course_id,),
+        )
+        return [(_video(r), Note(r["note_id"], r["id"], r["timestamp_ms"], r["text"])) for r in rows]
+
+    def lecture_index(self) -> dict[int, tuple[Course, Video, int]]:
+        """video id -> (course, video, 1-based lecture number) for every lecture in the library."""
+        index: dict[int, tuple[Course, Video, int]] = {}
+        for course in self.list_courses():
+            for number, video in enumerate(self.get_videos(course.id), 1):
+                index[video.id] = (course, video, number)
+        return index
+
+    def all_notes(self) -> list[Note]:
+        rows = self.conn.execute("SELECT id, video_id, timestamp_ms, text FROM notes ORDER BY video_id, timestamp_ms")
+        return [Note(r["id"], r["video_id"], r["timestamp_ms"], r["text"]) for r in rows]
+
+    # ---- quizzes and revision ----
+    def get_quiz(self, video_id: int) -> list[dict] | None:
+        row = self.conn.execute("SELECT questions FROM quizzes WHERE video_id = ?", (video_id,)).fetchone()
+        return json.loads(row["questions"]) if row else None
+
+    def save_quiz(self, video_id: int, questions: list[dict]) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO quizzes (video_id, questions) VALUES (?, ?) ON CONFLICT(video_id) DO UPDATE SET "
+                "questions = excluded.questions, created_at = CURRENT_TIMESTAMP",
+                (video_id, json.dumps(questions, ensure_ascii=False)),
+            )
+
+    def get_review(self, video_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM reviews WHERE video_id = ?", (video_id,)).fetchone()
+        return dict(row) if row else None
+
+    def ensure_review(self, video_id: int, due: date) -> None:
+        """First revision for a finished lecture (an existing schedule is kept)."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO reviews (video_id, due_date, interval_days) VALUES (?, ?, 1)",
+                (video_id, due.isoformat()),
+            )
+
+    def record_review(self, video_id: int, score: float, interval: float, due: date) -> None:
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO reviews (video_id, due_date, interval_days, last_score, attempts)
+                   VALUES (?, ?, ?, ?, 1)
+                   ON CONFLICT(video_id) DO UPDATE SET due_date = excluded.due_date,
+                   interval_days = excluded.interval_days, last_score = excluded.last_score,
+                   attempts = reviews.attempts + 1""",
+                (video_id, due.isoformat(), interval, score),
+            )
+
+    def due_reviews(self, today: date) -> list[tuple[Course, Video, dict]]:
+        """Lectures whose revision is due (oldest first)."""
+        rows = self.conn.execute(
+            """SELECT r.* FROM reviews r JOIN videos v ON v.id = r.video_id
+               WHERE r.due_date <= ? AND v.missing = 0 ORDER BY r.due_date, v.course_id, v.sort_order""",
+            (today.isoformat(),),
+        ).fetchall()
+        result = []
+        for row in rows:
+            video = self.get_video(row["video_id"])
+            course = self.get_course(video.course_id) if video else None
+            if course is not None:
+                result.append((course, video, dict(row)))
+        return result
 
     # ---- app state ----
     def get_state(self, key: str, default: str | None = None) -> str | None:

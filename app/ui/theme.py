@@ -40,6 +40,15 @@ QFrame#CourseCard {{ background: transparent; border-radius: 12px; }}
 QFrame#CourseCard:hover {{ background: {SURFACE}; }}
 QFrame#SidePanel {{ background: {SURFACE}; border-radius: 12px; }}
 QFrame#NotesPanel {{ background: {SURFACE}; border-radius: 12px; }}
+QLabel#QuizQuestion {{ font-size: 16px; font-weight: 600; }}
+QLabel#QuizScore {{ font-size: 26px; font-weight: 800; }}
+QLabel#QuizExplain {{ color: {MUTED}; }}
+QFrame#QuizOption {{ background: {SURFACE}; border: 1px solid #303030; border-radius: 10px; }}
+QFrame#QuizOption:hover {{ border: 1px solid #5a5a5a; }}
+QFrame#QuizOption[state="selected"] {{ border: 1px solid #3ea6ff; background: rgba(62, 166, 255, 0.12); }}
+QFrame#QuizOption[state="correct"] {{ border: 1px solid #2ba640; background: rgba(43, 166, 64, 0.18); }}
+QFrame#QuizOption[state="wrong"] {{ border: 1px solid #ff4d6a; background: rgba(255, 0, 51, 0.15); }}
+QLabel#QuizOptionText {{ background: transparent; font-size: 14px; }}
 QPlainTextEdit#NoteInput {{ background: {BG}; border: 1px solid #303030; border-radius: 8px; padding: 2px 4px; }}
 QPlainTextEdit#NoteInput:focus {{ border: 1px solid #3ea6ff; }}
 QScrollArea#NotesScroll, QWidget#NotesList {{ background: transparent; }}
@@ -70,6 +79,8 @@ QTreeWidget::item:selected {{ background: #3a3a3a; color: {TEXT}; }}
 QTreeWidget::branch {{ background: transparent; }}
 QListWidget::item {{ padding: 8px 6px; border-radius: 8px; }}
 QListWidget::item:selected {{ background: #3a3a3a; color: {TEXT}; }}
+QListWidget#ChapterList {{ border-bottom: 1px solid #303030; }}
+QListWidget#ChapterList::item {{ padding: 5px 6px; font-weight: 600; }}
 
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: #4a4a4a; border-radius: 5px; min-height: 30px; }}

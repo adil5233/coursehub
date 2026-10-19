@@ -1,13 +1,17 @@
-from PySide6.QtCore import QByteArray, QPoint
+from PySide6.QtCore import QByteArray, QPoint, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QInputDialog, QLineEdit, QMainWindow, QMenu, QMessageBox, QStackedWidget
 
 from ..transcribe.service import TranscriptManager
 from .add_course_dialog import AddCourseDialog
 from .course_view import CourseView
 from .library_view import LibraryView
+from .quiz_dialog import QuizDialog
 from .remote import scan_source
+from .search_dialog import SearchDialog
 from .settings_dialog import SettingsDialog
 from .thumbnails import ThumbnailManager
+from .utils import export_course_notes
 
 
 class MainWindow(QMainWindow):
@@ -28,10 +32,33 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.stack)
 
         self.library.open_course.connect(lambda course_id: self.open_course(course_id, autoplay=True))
+        self.library.continue_lecture.connect(self.continue_lecture)
+        self.library.revise_lecture.connect(self.revise_lecture)
         self.library.add_course.connect(self.add_course)
         self.library.settings_requested.connect(lambda: SettingsDialog(self.services, self).exec())
         self.library.course_menu.connect(self.show_course_menu)
+        self.library.search_requested.connect(self.open_search)
         self.course_view.back_requested.connect(self.show_library)
+        self.course_view.search_requested.connect(self.open_search)
+        search_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        search_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        search_shortcut.activated.connect(self.open_search)
+
+    def open_search(self) -> None:
+        self.course_view.exit_fullscreen()
+        dialog = SearchDialog(self.db, self)
+        dialog.jump_requested.connect(self.jump_to)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def jump_to(self, course_id: int, video_id: int, time_ms: int) -> None:
+        """Open a lecture at a moment (from search results)."""
+        view = self.course_view
+        if view.course is not None and view.course.id == course_id and self.stack.currentWidget() is view:
+            view.jump_to(video_id, time_ms)
+            return
+        self.db.save_position(video_id, time_ms)
+        self.continue_lecture(course_id, video_id)
 
     def show_fitted(self) -> None:
         """Restore the last window size, but never let the player controls fall off-screen."""
@@ -58,6 +85,21 @@ class MainWindow(QMainWindow):
         else:
             self.show_library()
 
+    def revise_lecture(self, course_id: int, video_id: int) -> None:
+        course, video = self.db.get_course(course_id), self.db.get_video(video_id)
+        if course is None or video is None:
+            return
+        dialog = QuizDialog(self.db, course, video, self)
+        dialog.jump_requested.connect(self.jump_to)
+        dialog.exec()
+        dialog.deleteLater()
+        if self.stack.currentWidget() is self.library:
+            self.library.refresh()
+
+    def continue_lecture(self, course_id: int, video_id: int) -> None:
+        self.db.set_last_video(course_id, video_id)  # open_course resumes the course's last lecture
+        self.open_course(course_id, autoplay=True)
+
     def show_library(self) -> None:
         self.course_view.close_course()
         self.db.set_state("last_course_id", None)
@@ -79,6 +121,7 @@ class MainWindow(QMainWindow):
         rename_action = menu.addAction("Rename...")
         rescan_action = menu.addAction("Sync videos (check for new)")
         transcribe_action = menu.addAction("Transcribe whole course")
+        export_action = menu.addAction("Export notes (Markdown)...")
         reset_action = menu.addAction("Reset progress")
         menu.addSeparator()
         remove_action = menu.addAction("Remove course")
@@ -92,6 +135,8 @@ class MainWindow(QMainWindow):
                 self.course_view.show_transcript()
                 self.course_view.transcribe_course()
             return
+        elif chosen is export_action:
+            export_course_notes(self, self.db, course)
         elif chosen is rename_action:
             name, ok = QInputDialog.getText(self, "Rename course", "Course name:", QLineEdit.EchoMode.Normal, course.name)
             if ok and name.strip():

@@ -144,6 +144,7 @@ class SeekSlider(QSlider):
         super().__init__(orientation, parent)
         self._scrubbing = False
         self._buffered: list[tuple[float, float]] = []
+        self._chapters: list[float] = []  # chapter starts as fractions (gaps in the bar, like YouTube)
         self._hover_fraction: float | None = None
         self._grow = 0.0  # 0 = resting, 1 = hovered
         self._grow_anim = QVariantAnimation(self)
@@ -156,6 +157,11 @@ class SeekSlider(QSlider):
         """Already-downloaded parts of the video as (start, end) fractions, drawn lighter like YouTube."""
         if ranges != self._buffered:
             self._buffered = ranges
+            self.update()
+
+    def set_chapters(self, fractions: list[float]) -> None:
+        if fractions != self._chapters:
+            self._chapters = fractions
             self.update()
 
     def _set_grow(self, value) -> None:
@@ -199,6 +205,8 @@ class SeekSlider(QSlider):
         if self._hover_fraction is not None:
             bar(0.0, self._hover_fraction, QColor(255, 255, 255, 150))  # shows where a click would jump to
         bar(0.0, played, QColor(ACCENT))
+        for fraction in self._chapters:
+            painter.fillRect(QRectF(left + fraction * span - 1.5, top - 1, 3, height + 2), QColor(0, 0, 0, 220))
         radius = self.SCRUBBER * (1.0 if self._scrubbing else self._grow)
         if radius > 0.5:
             painter.setBrush(QColor(ACCENT))
@@ -667,6 +675,8 @@ class VideoPlayer(QWidget):
         self._spu_track = -1
         self._cues: CueTrack | None = None  # SRT/VTT drawn by the overlay instead of VLC
         self._cues_on = True
+        self._chapters: list[dict] = []  # {"start_ms", "title"}
+        self._chapters_length = 0
         self._seek_target: int | None = None
         self._seek_deadline = 0.0
         self._ended_early = False
@@ -931,6 +941,8 @@ class VideoPlayer(QWidget):
         self.cc_btn.hide()
         self._cues = None
         self.overlay.set_subtitle("")
+        self._chapters = []
+        self.slider.set_chapters([])
         self._set_playing(False)
         self._update_time_label()
 
@@ -946,6 +958,27 @@ class VideoPlayer(QWidget):
 
     def has_media(self) -> bool:
         return self._mrl is not None
+
+    def is_playing(self) -> bool:
+        return self._playing
+
+    def set_chapters(self, chapters: list[dict]) -> None:
+        self._chapters = sorted(chapters, key=lambda c: c["start_ms"])
+        self._apply_chapters()
+        self._update_time_label()
+
+    def _apply_chapters(self) -> None:
+        self._chapters_length = self._length
+        self.slider.set_chapters([c["start_ms"] / self._length for c in self._chapters
+                                  if 0 < c["start_ms"] < self._length] if self._length > 0 else [])
+
+    def chapter_at(self, ms: int) -> str:
+        title = ""
+        for chapter in self._chapters:
+            if chapter["start_ms"] > ms:
+                break
+            title = chapter["title"]
+        return title
 
     def has_subtitle(self) -> bool:
         return self._subtitle is not None
@@ -1144,6 +1177,8 @@ class VideoPlayer(QWidget):
         length = self._player.get_length()
         if length > 0:
             self._length = length
+        if self._chapters and self._length != self._chapters_length:
+            self._apply_chapters()
         position = self._player.get_time()
         # Before playback settles VLC reports 0 while buffering, which must not overwrite the resume position.
         if self._settled and position >= 0 and (playing or (state == vlc.State.Paused and position > 0)):
@@ -1208,6 +1243,7 @@ class VideoPlayer(QWidget):
         self._preview_bucket = ms // step * step
         card = self.seek_preview
         card.time.setText(format_ms(ms))
+        card.set_chapter(self.chapter_at(ms))
         image = self.previewer.cached(self._preview_bucket) if self.previewer is not None else None
         if image is not None:
             card.set_image(image)
@@ -1235,4 +1271,7 @@ class VideoPlayer(QWidget):
 
     def _update_time_label(self) -> None:
         if not self._dragging:
-            self.time_label.setText(f"{format_ms(self._last_time)} / {format_ms(self._length)}")
+            text = f"{format_ms(self._last_time)} / {format_ms(self._length)}"
+            if title := self.chapter_at(self._last_time):
+                text += f"  \u2022  {title if len(title) <= 40 else title[:39] + '\u2026'}"
+            self.time_label.setText(text)
