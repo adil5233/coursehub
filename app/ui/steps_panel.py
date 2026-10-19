@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 
 from ..config import format_ms
 from ..transcribe.grade import BackgroundCall, grade
+from .pack_progress import PackProgress
 from .recorder import VoiceAnswerButton
 
 STEP_INDEX = Qt.ItemDataRole.UserRole
@@ -226,6 +227,7 @@ class StepsPanel(QFrame):
         row = QHBoxLayout()
         row.addWidget(self.status, 1)
         row.addWidget(self.make_button)
+        self.pack_progress = PackProgress()
         self.mantra = QLabel()
         self.mantra.setObjectName("Mantra")
         self.mantra.setWordWrap(True)
@@ -245,6 +247,7 @@ class StepsPanel(QFrame):
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(8)
         layout.addLayout(row)
+        layout.addWidget(self.pack_progress)
         layout.addWidget(self.mantra)
         layout.addWidget(self.card)
         layout.addWidget(self.list, 1)
@@ -272,6 +275,7 @@ class StepsPanel(QFrame):
         self.make_button.setEnabled(text is None)
         if text is not None:
             self.status.setText(text)
+            self.pack_progress.update_stage(text)
         elif self.steps:
             done = sum(1 for status in self.progress.values() if status == "done")
             self.status.setText(f"{done} of {len(self.steps)} steps samajh aaye. Click: jump, double-click: check.")

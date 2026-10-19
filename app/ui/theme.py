@@ -56,6 +56,7 @@ QLabel#CheckpointQuestion {{ font-size: 14px; font-weight: 600; }}
 QLabel#CheckpointAnswer {{ color: #7ee787; }}
 QLabel#CheckpointGrade {{ background: rgba(62, 166, 255, 0.10); border-radius: 8px; padding: 6px 8px; }}
 QLabel#Mantra {{ color: #ffd166; font-weight: 600; }}
+QLabel#PackPercent {{ color: #c9b6ff; font-weight: 700; font-size: 12px; }}
 QLabel#MistakeKicker {{ color: #ff4d6a; font-size: 11px; font-weight: 800; }}
 QListWidget#MistakeList {{ background: #181818; border-radius: 10px; }}
 QPlainTextEdit#NoteInput {{ background: {BG}; border: 1px solid #303030; border-radius: 8px; padding: 2px 4px; }}

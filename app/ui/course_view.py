@@ -491,6 +491,8 @@ class CourseView(QWidget):
         self.player.set_steps([step["start_ms"] for step in data["steps"][1:]])
         if video is not None and self.pack_maker.busy_video == video.id:
             self.steps.set_busy("Making the study pack...")
+        elif not self.steps.pack_progress.finishing():
+            self.steps.pack_progress.fail()  # another lecture: its pack is not being made
         elif video is None or not has_transcript(video.id):
             self.steps.set_can_make(False)
 
@@ -518,12 +520,14 @@ class CourseView(QWidget):
     def _on_pack_ready(self, video_id: int, pack: dict) -> None:
         save_pack(self.db, video_id, pack)  # main thread: the sqlite connection lives here
         if self.current is not None and self.current.id == video_id:
+            self.steps.pack_progress.finish()
             self._asked_steps.clear()
             self._load_steps()
             self._load_chapters()
 
     def _on_pack_failed(self, video_id: int, message: str) -> None:
         if self.current is not None and self.current.id == video_id:
+            self.steps.pack_progress.fail()
             self.steps.set_busy(None)
             self.transcript.set_chapters_busy(None)
             QMessageBox.warning(self, "Study pack", message)
