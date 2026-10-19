@@ -14,7 +14,8 @@ from ..review import FIRST_INTERVAL, due_after
 from ..transcribe import groq_client, has_transcript, load_transcript, srt_path
 from ..transcribe.chapters import ChapterMaker, load_chapters
 from ..transcribe.grade import PASS_SCORE, context_for
-from ..transcribe.steps import StepMaker, load_steps, step_index_at
+from ..transcribe.pack import PackMaker, save_pack
+from ..transcribe.steps import load_steps, step_index_at
 from ..transcribe.summary import NoteSummarizer
 from .ask_panel import AskPanel
 from .notes_panel import NotesPanel
@@ -302,15 +303,15 @@ class CourseView(QWidget):
         self.side_stack.addWidget(self.ask)
         self.steps = StepsPanel()
         self.steps.seek_requested.connect(self._seek_to_step)
-        self.steps.make_requested.connect(self.make_steps)
+        self.steps.make_requested.connect(self.make_pack)
         self.steps.marked.connect(self._on_step_marked)
         self.steps.replay_requested.connect(self._replay_step)
         self.steps.checkpoint_closed.connect(self._on_checkpoint_closed)
         self.steps.context_provider = self._step_context
-        self.step_maker = StepMaker(self)
-        self.step_maker.progress.connect(self._on_steps_progress)
-        self.step_maker.finished.connect(self._on_steps_ready)
-        self.step_maker.failed.connect(self._on_steps_failed)
+        self.pack_maker = PackMaker(self)
+        self.pack_maker.progress.connect(self._on_pack_progress)
+        self.pack_maker.finished.connect(self._on_pack_ready)
+        self.pack_maker.failed.connect(self._on_pack_failed)
         self.side_stack.addWidget(self.steps)
         tabs = QHBoxLayout()
         tabs.setSpacing(8)
@@ -433,12 +434,16 @@ class CourseView(QWidget):
         chapters = load_chapters(self.current.id) if self.current is not None else []
         self.player.set_chapters(chapters)
         self.transcript.set_chapters(chapters)
-        busy = self.current is not None and self.chapter_maker.busy_video == self.current.id
+        busy = self.current is not None and self.current.id in (self.chapter_maker.busy_video,
+                                                                self.pack_maker.busy_video)
         self.transcript.set_chapters_busy("Making chapters..." if busy else None)
 
     def make_chapters(self) -> None:
         video = self.current
         if video is None or self.chapter_maker.busy_video is not None:
+            return
+        if not load_steps(video.id)["steps"]:
+            self.make_pack()  # first time: one read of the transcript makes chapters, steps and quiz together
             return
         segments = load_transcript(video.id)
         if not segments:
@@ -484,14 +489,15 @@ class CourseView(QWidget):
         progress = self.db.step_progress(video.id) if video is not None and data["steps"] else {}
         self.steps.set_steps(data["steps"], data["mantra"], progress)
         self.player.set_steps([step["start_ms"] for step in data["steps"][1:]])
-        if video is not None and self.step_maker.busy_video == video.id:
-            self.steps.set_busy("Making steps...")
+        if video is not None and self.pack_maker.busy_video == video.id:
+            self.steps.set_busy("Making the study pack...")
         elif video is None or not has_transcript(video.id):
             self.steps.set_can_make(False)
 
-    def make_steps(self) -> None:
+    def make_pack(self) -> None:
+        """Steps, chapters and quiz questions from one read of the transcript (saves the free Groq limit)."""
         video = self.current
-        if video is None or self.step_maker.busy_video is not None:
+        if video is None or self.pack_maker.busy_video is not None:
             return
         segments = load_transcript(video.id)
         if not segments:
@@ -500,23 +506,27 @@ class CourseView(QWidget):
             QMessageBox.information(self, "Groq API key needed", "Paste your Groq API key in Settings \u2192 "
                                     "Transcripts first.")
             return
-        self.steps.set_busy("Making steps...")
-        self.step_maker.start(video.id, segments)
+        self.steps.set_busy("Making the study pack...")
+        self.transcript.set_chapters_busy("Making the study pack...")
+        self.pack_maker.start(video.id, segments)
 
-    def _on_steps_progress(self, video_id: int, text: str) -> None:
+    def _on_pack_progress(self, video_id: int, text: str) -> None:
         if self.current is not None and self.current.id == video_id:
             self.steps.set_busy(text)
+            self.transcript.set_chapters_busy(text)
 
-    def _on_steps_ready(self, video_id: int, _data: dict) -> None:
-        self.db.clear_step_progress(video_id)  # new steps: the old step indexes no longer match
+    def _on_pack_ready(self, video_id: int, pack: dict) -> None:
+        save_pack(self.db, video_id, pack)  # main thread: the sqlite connection lives here
         if self.current is not None and self.current.id == video_id:
             self._asked_steps.clear()
             self._load_steps()
+            self._load_chapters()
 
-    def _on_steps_failed(self, video_id: int, message: str) -> None:
+    def _on_pack_failed(self, video_id: int, message: str) -> None:
         if self.current is not None and self.current.id == video_id:
             self.steps.set_busy(None)
-            QMessageBox.warning(self, "Study steps", message)
+            self.transcript.set_chapters_busy(None)
+            QMessageBox.warning(self, "Study pack", message)
 
     def _step_end(self, index: int, length: int) -> float:
         steps = self.steps.steps
@@ -714,7 +724,7 @@ class CourseView(QWidget):
         self._load_steps()
         settings = groq_client.load_settings()
         if settings["auto"] and settings["api_key"] and not self.steps.steps:
-            self.make_steps()
+            self.make_pack()
 
     def _on_transcript_failed(self, video_id: int, message: str) -> None:
         if self.current is not None and self.current.id == video_id:
@@ -769,7 +779,7 @@ class CourseView(QWidget):
         self.db.set_state("volume", str(self.player.volume()))
         self.notes.summarizer.shutdown()
         self.chapter_maker.shutdown()
-        self.step_maker.shutdown()
+        self.pack_maker.shutdown()
         self.player.release()
 
     def sync_course(self) -> None:

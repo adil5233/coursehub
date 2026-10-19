@@ -11,6 +11,7 @@ from ..config import display_title, format_ms
 from ..review import due_after, next_interval
 from ..transcribe import groq_client, load_transcript
 from ..transcribe.grade import BackgroundCall, context_for
+from ..transcribe.pack import make_pack, save_pack
 from ..transcribe.quiz import QuizMaker, _spread, make_open_questions
 from ..transcribe.steps import load_steps
 from .open_quiz import OpenQuizPage
@@ -66,6 +67,7 @@ class QuizDialog(QDialog):
         self._wrong: list[dict] = []
         self._mode = "mcq"
         self._open_maker: BackgroundCall | None = None
+        self._pack_maker: BackgroundCall | None = None
 
         title = QLabel(display_title(video.title))
         title.setObjectName("SectionTitle")
@@ -210,10 +212,36 @@ class QuizDialog(QDialog):
             self._load_open(mode)
 
     def _fresh(self) -> None:
+        """"New questions": only this kind of question is written again."""
         if self._mode == "mcq":
-            self._generate()
+            self._generate(fresh=True)
         else:
-            self._generate_open(self._mode)
+            self._generate_open(self._mode, fresh=True)
+
+    def _make_pack(self, segments) -> None:
+        """A lecture without questions yet gets its whole study pack from one read of the transcript."""
+        self._show_message("Making the study pack (steps, chapters and questions) in one go...", busy=True)
+        if self._pack_maker is None:
+            self._pack_maker = BackgroundCall(self)
+            self._pack_maker.progress.connect(lambda text: self.loading_label.setText(text))
+            self._pack_maker.finished.connect(self._on_pack_made)
+            self._pack_maker.failed.connect(lambda message: self._show_message(message))
+        self._pack_maker.start(make_pack, segments)
+
+    def _on_pack_made(self, pack: dict) -> None:
+        save_pack(self.db, self.video.id, pack, replace=False)  # keep steps / chapters the lecture already has
+        if self._mode == "mcq":
+            saved = self.db.get_quiz(self.video.id)
+            if saved:
+                self._questions = saved
+                self._start()
+            else:
+                self._generate(fresh=True)  # the pack had no usable MCQs: ask for them alone
+        elif questions := self._open_questions(self._mode):
+            self.open_page.start(questions, interview=self._mode == "interview")
+            self.pages.setCurrentIndex(3)
+        else:
+            self._generate_open(self._mode, fresh=True)
 
     def _context_at(self, time_ms: int) -> str:
         return context_for(load_transcript(self.video.id), time_ms)
@@ -232,9 +260,9 @@ class QuizDialog(QDialog):
             self.open_page.start(questions, interview=mode == "interview")
             self.pages.setCurrentIndex(3)
         else:
-            self._generate_open(mode)
+            self._generate_open(mode, fresh=False)
 
-    def _generate_open(self, mode: str) -> None:
+    def _generate_open(self, mode: str, fresh: bool = True) -> None:
         segments = load_transcript(self.video.id)
         if not segments:
             self._show_message("These questions are made from the lecture's transcript.\n\n"
@@ -242,6 +270,9 @@ class QuizDialog(QDialog):
             return
         if not groq_client.load_settings()["api_key"]:
             self._show_message("Quizzes use Groq's free API. Paste your key in Settings \u2192 Transcripts.")
+            return
+        if not fresh and not load_steps(self.video.id)["steps"]:  # the pack is made once per lecture
+            self._make_pack(segments)
             return
         self._show_message("Writing questions from the transcript...", busy=True)
         if self._open_maker is None:
@@ -276,9 +307,9 @@ class QuizDialog(QDialog):
             self._questions = saved
             self._start()
         else:
-            self._generate()
+            self._generate(fresh=False)
 
-    def _generate(self) -> None:
+    def _generate(self, fresh: bool = True) -> None:
         segments = load_transcript(self.video.id)
         if not segments:
             self._show_message("The quiz is made from the lecture's transcript.\n\n"
@@ -286,6 +317,9 @@ class QuizDialog(QDialog):
             return
         if not groq_client.load_settings()["api_key"]:
             self._show_message("Quizzes use Groq's free API. Paste your key in Settings \u2192 Transcripts.")
+            return
+        if not fresh and not load_steps(self.video.id)["steps"]:  # the pack is made once per lecture
+            self._make_pack(segments)
             return
         self._show_message("Writing questions from the transcript...", busy=True)
         self._maker = QuizMaker(self)
@@ -399,7 +433,7 @@ class QuizDialog(QDialog):
     def done(self, result: int) -> None:
         if self._maker is not None:
             self._maker.cancel()
-        for call in (self._open_maker, self.open_page.grader, self.open_page.voice_button.speech):
+        for call in (self._open_maker, self._pack_maker, self.open_page.grader, self.open_page.voice_button.speech):
             if call is not None:
                 call.cancel()
         super().done(result)

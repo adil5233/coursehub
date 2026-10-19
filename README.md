@@ -35,6 +35,11 @@ A Udemy-style desktop app for Windows to watch video courses from your **local P
 
 These need a free [Groq API key](https://console.groq.com/keys) (Settings → Transcripts) and the lecture's transcript.
 
+To stay inside Groq's free limits:
+- **Study pack**: steps, chapters and quiz questions come from one read of the transcript, made once per lecture.
+- **Model fallback**: Groq's limits are per model, so when one model hits its limit the next one takes over
+  (gpt-oss-120b → llama-3.3-70b → gpt-oss-20b → qwen3.8-27b → llama-3.1-8b-instant).
+
 | Feature | What it does |
 | --- | --- |
 | Transcript | Groq Whisper subtitles and a searchable transcript; click a line to jump there |

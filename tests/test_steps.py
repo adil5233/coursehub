@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 import app.transcribe as transcribe  # noqa: E402
 from app.db import Database  # noqa: E402
 from app.models import ScannedVideo  # noqa: E402
-from app.transcribe import Segment, steps  # noqa: E402
+from app.transcribe import steps  # noqa: E402
 
 STEPS = [
     {"start_ms": 0, "title": "Neuron", "ek_line": "Neuron inputs ko weights se multiply karta hai.",
@@ -25,10 +25,6 @@ STEPS = [
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
-
-
-def lecture(minutes: int) -> list[Segment]:
-    return [Segment(s, s + 9, f"line {s}") for s in range(0, minutes * 60, 10)]
 
 
 def test_parse_steps_keeps_valid_items_and_trims():
@@ -65,30 +61,18 @@ def test_step_index_at():
     assert steps.step_index_at([{"start_ms": 5000}], 0) == -1
 
 
-def test_make_steps_mantra_and_storage(tmp_path, monkeypatch):
+def test_make_mantra_and_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(transcribe, "TRANSCRIPTS_DIR", tmp_path)
-    monkeypatch.setattr(steps, "marked_parts", lambda segments: [(0, 599_000, "a"), (600_000, 1_200_000, "b")])
-    replies = iter(['[{"time": "0:00", "title": "Basics", "ek_line": "x"}]',
-                    '[{"time": "11:00", "title": "Training", "ek_line": "y"}]',
-                    '"Weights badlo, loss ghatao"'])
     prompts = []
-
-    def fake_ask(_key, prompt, *_args, **_kwargs):
-        prompts.append(prompt)
-        return next(replies)
-
-    monkeypatch.setattr(steps, "ask", fake_ask)
-    data = steps.make_steps("key", lecture(1))
-    assert [s["title"] for s in data["steps"]] == ["Basics", "Training"]
-    assert data["mantra"] == "Weights badlo, loss ghatao"  # quotes stripped
+    monkeypatch.setattr(steps, "ask", lambda _key, prompt, *a, **k: prompts.append(prompt) or '"Weights badlo"')
+    mantra = steps.make_mantra("key", [{"title": "Basics", "ek_line": "x"}, {"title": "Training", "ek_line": "y"}])
+    assert mantra == "Weights badlo"  # quotes stripped
     assert "Basics: x" in prompts[-1] and "Training: y" in prompts[-1]
+    data = {"steps": STEPS, "mantra": mantra}
     steps.save_steps(7, data)
     assert steps.load_steps(7) == data
     assert steps.load_steps(8) == {"steps": [], "mantra": ""}
     assert not list(tmp_path.glob("*.tmp"))
-    monkeypatch.setattr(steps, "ask", lambda *a, **k: "[]")
-    with pytest.raises(steps.groq_client.GroqError):
-        steps.make_steps("key", lecture(1))
 
 
 def test_db_step_progress(tmp_path):
@@ -112,7 +96,7 @@ def test_steps_panel_list_and_checkpoint(app):
     panel = StepsPanel()
     panel.set_steps(STEPS, "Weights badlo", {0: "done"})
     assert panel.list.count() == 3 and panel.list.item(0).text().startswith("✅")
-    assert panel.mantra.text() == "Mantra: Weights badlo" and panel.make_button.text() == "Remake steps"
+    assert panel.mantra.text() == "Mantra: Weights badlo" and panel.make_button.text() == "Remake study pack"
     assert "1 of 3" in panel.status.text()
     seeks, marks, replays = [], [], []
     panel.seek_requested.connect(seeks.append)
