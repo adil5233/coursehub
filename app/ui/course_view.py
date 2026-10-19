@@ -296,8 +296,9 @@ class CourseView(QWidget):
         self.side_stack = QStackedWidget()
         self.side_stack.addWidget(content_page)
         self.side_stack.addWidget(self.transcript)
-        self.ask = AskPanel()
+        self.ask = AskPanel(db, self.player.time, self._step_text)
         self.ask.jump_requested.connect(self.jump_to)
+        self.ask.typing_started.connect(self._pause_for_question)
         self.side_stack.addWidget(self.ask)
         self.steps = StepsPanel()
         self.steps.seek_requested.connect(self._seek_to_step)
@@ -559,6 +560,18 @@ class CourseView(QWidget):
             self._resume_after_check = False
             if not self.player.is_playing():
                 self.player.toggle_play()
+
+    def _step_text(self, ms: int) -> str:
+        steps = self.steps.steps
+        index = step_index_at(steps, ms)
+        if index < 0:
+            return ""
+        step = steps[index]
+        return f"{step['title']}: {step['ek_line']}" if step.get("ek_line") else step["title"]
+
+    def _pause_for_question(self) -> None:
+        if self.player.is_playing():
+            self.player.toggle_play()
 
     def _seek_to_step(self, start_ms: int) -> None:
         self._last_position = None  # a jump, not playback

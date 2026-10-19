@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS mistakes (
     last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (video_id, question)
 );
+CREATE TABLE IF NOT EXISTS doubts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    time_ms INTEGER NOT NULL DEFAULT 0,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    sources TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS step_progress (
     video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
     step_index INTEGER NOT NULL,
@@ -440,6 +449,19 @@ class Database:
         """"Yaad ho gaya": the learner got it now."""
         with self.conn:
             self.conn.execute("DELETE FROM mistakes WHERE id = ?", (mistake_id,))
+
+    # ---- doubts asked about a lecture ----
+    def add_doubt(self, video_id: int, time_ms: int, question: str, answer: str, sources: list[dict]) -> None:
+        """sources: the cited passages as {"video_id", "start_ms", "label"}."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO doubts (video_id, time_ms, question, answer, sources) VALUES (?, ?, ?, ?, ?)",
+                (video_id, int(time_ms), question, answer, json.dumps(sources)),
+            )
+
+    def list_doubts(self, video_id: int) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM doubts WHERE video_id = ? ORDER BY id", (video_id,))
+        return [dict(row, sources=json.loads(row["sources"])) for row in rows]
 
     # ---- app state ----
     def get_state(self, key: str, default: str | None = None) -> str | None:
