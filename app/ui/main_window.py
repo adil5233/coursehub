@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
         self.library.open_course.connect(lambda course_id: self.open_course(course_id, autoplay=True))
         self.library.continue_lecture.connect(self.continue_lecture)
         self.library.revise_lecture.connect(self.revise_lecture)
+        self.library.mistake_opened.connect(self.open_mistake)
         self.library.add_course.connect(self.add_course)
         self.library.settings_requested.connect(lambda: SettingsDialog(self.services, self).exec())
         self.library.course_menu.connect(self.show_course_menu)
@@ -84,6 +85,19 @@ class MainWindow(QMainWindow):
             self.db.set_state("last_course_id", str(course_id))
         else:
             self.show_library()
+
+    def open_mistake(self, mistake_id: int) -> None:
+        from .mistakes_dialog import MistakeDialog
+
+        mistake = self.db.get_mistake(mistake_id)
+        if mistake is None:
+            return
+        dialog = MistakeDialog(self.db, mistake, self)
+        dialog.jump_requested.connect(self.jump_to)
+        dialog.exec()
+        dialog.deleteLater()
+        if self.stack.currentWidget() is self.library:
+            self.library.refresh()
 
     def revise_lecture(self, course_id: int, video_id: int) -> None:
         course, video = self.db.get_course(course_id), self.db.get_video(video_id)

@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS open_quizzes (
     data TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS mistakes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    step_index INTEGER,
+    time_ms INTEGER NOT NULL DEFAULT 0,
+    question TEXT NOT NULL,
+    correct TEXT NOT NULL DEFAULT '',
+    my_answer TEXT NOT NULL DEFAULT '',
+    wrong_count INTEGER NOT NULL DEFAULT 1,
+    last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (video_id, question)
+);
 CREATE TABLE IF NOT EXISTS step_progress (
     video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
     step_index INTEGER NOT NULL,
@@ -387,6 +399,47 @@ class Database:
         """Steps were remade, so the old indexes no longer match."""
         with self.conn:
             self.conn.execute("DELETE FROM step_progress WHERE video_id = ?", (video_id,))
+
+    # ---- mistakes ("Baar" = how many times the same question went wrong) ----
+    def add_mistake(self, video_id: int, question: str, correct: str = "", my_answer: str = "", time_ms: int = 0,
+                    step_index: int | None = None) -> int:
+        """Log a wrong answer; the same question again raises its count. Returns the new count."""
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO mistakes (video_id, step_index, time_ms, question, correct, my_answer)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(video_id, question) DO UPDATE SET wrong_count = mistakes.wrong_count + 1,
+                   correct = excluded.correct, my_answer = excluded.my_answer, time_ms = excluded.time_ms,
+                   step_index = COALESCE(excluded.step_index, mistakes.step_index), last_seen = CURRENT_TIMESTAMP""",
+                (video_id, step_index, int(time_ms), question, correct, my_answer),
+            )
+        row = self.conn.execute(
+            "SELECT wrong_count FROM mistakes WHERE video_id = ? AND question = ?", (video_id, question)).fetchone()
+        return row["wrong_count"]
+
+    _MISTAKE_SELECT = """SELECT m.*, v.title AS video_title, v.course_id, c.name AS course_name
+        FROM mistakes m JOIN videos v ON v.id = m.video_id JOIN courses c ON c.id = v.course_id
+        WHERE v.missing = 0"""
+
+    def mistakes(self, limit: int = -1) -> list[dict]:
+        """Open mistakes of the whole library, most repeated first, with course and lecture names."""
+        rows = self.conn.execute(
+            self._MISTAKE_SELECT + " ORDER BY m.wrong_count DESC, m.last_seen DESC, m.id DESC LIMIT ?", (limit,))
+        return [dict(row) for row in rows]
+
+    def mistakes_for_video(self, video_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM mistakes WHERE video_id = ? ORDER BY wrong_count DESC, time_ms", (video_id,))
+        return [dict(row) for row in rows]
+
+    def get_mistake(self, mistake_id: int) -> dict | None:
+        row = self.conn.execute(self._MISTAKE_SELECT + " AND m.id = ?", (mistake_id,)).fetchone()
+        return dict(row) if row else None
+
+    def resolve_mistake(self, mistake_id: int) -> None:
+        """"Yaad ho gaya": the learner got it now."""
+        with self.conn:
+            self.conn.execute("DELETE FROM mistakes WHERE id = ?", (mistake_id,))
 
     # ---- app state ----
     def get_state(self, key: str, default: str | None = None) -> str | None:

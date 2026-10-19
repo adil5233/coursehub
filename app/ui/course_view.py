@@ -13,7 +13,7 @@ from ..player.vlc_widget import SEEK_STEP_MS, VOLUME_STEP, VideoPlayer, glyph_ic
 from ..review import FIRST_INTERVAL, due_after
 from ..transcribe import groq_client, has_transcript, load_transcript, srt_path
 from ..transcribe.chapters import ChapterMaker, load_chapters
-from ..transcribe.grade import context_for
+from ..transcribe.grade import PASS_SCORE, context_for
 from ..transcribe.steps import StepMaker, load_steps, step_index_at
 from ..transcribe.summary import NoteSummarizer
 from .ask_panel import AskPanel
@@ -576,8 +576,15 @@ class CourseView(QWidget):
             self.player.toggle_play()
 
     def _on_step_marked(self, index: int, status: str, answer: str, score) -> None:
-        if self.current is not None:
-            self.db.set_step_progress(self.current.id, index, status, answer, score)
+        if self.current is None or not 0 <= index < len(self.steps.steps):
+            return
+        self.db.set_step_progress(self.current.id, index, status, answer, score)
+        if status == "again" or (score is not None and score < PASS_SCORE):
+            step = self.steps.steps[index]
+            check = step.get("check")
+            question = check["q"] if check else f"{step['title']}: samajh nahi aaya"
+            correct = (check.get("a") if check else "") or step.get("ek_line", "")
+            self.db.add_mistake(self.current.id, question, correct, answer, step["start_ms"], index)
 
     def _step_context(self, index: int) -> str:
         steps = self.steps.steps

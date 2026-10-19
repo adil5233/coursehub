@@ -89,6 +89,7 @@ class QuizDialog(QDialog):
         self.open_page = OpenQuizPage()
         self.open_page.context_provider = self._context_at
         self.open_page.finished.connect(self._finish_open)
+        self.open_page.answered.connect(self._on_open_answered)
         self.open_page.jump_requested.connect(
             lambda ms: (self.jump_requested.emit(self.course.id, self.video.id, ms), self.accept()))
         self.pages = QStackedWidget()
@@ -298,8 +299,15 @@ class QuizDialog(QDialog):
         self._questions = questions
         self._start()
 
+    def _on_open_answered(self, question: dict, answer: str, result) -> None:
+        if not result.passed:
+            self.db.add_mistake(self.video.id, question["q"], question.get("a") or result.better, answer,
+                                int(question.get("time_ms", 0)))
+
     def _start(self) -> None:
-        self._order = random.sample(range(len(self._questions)), len(self._questions))
+        order = random.sample(range(len(self._questions)), len(self._questions))
+        missed = {m["question"] for m in self.db.mistakes_for_video(self.video.id)}
+        self._order = sorted(order, key=lambda i: self._questions[i]["q"] not in missed)  # old mistakes first
         self._index, self._correct, self._wrong = 0, 0, []
         self._show_question()
         self.pages.setCurrentIndex(1)
@@ -345,6 +353,9 @@ class QuizDialog(QDialog):
         self._correct += correct
         if not correct:
             self._wrong.append(question)
+            chosen = question["options"][self._shuffled[self._chosen]] if self._chosen is not None else ""
+            self.db.add_mistake(self.video.id, question["q"], question["options"][question["answer"]], chosen,
+                                int(question.get("time_ms", 0)))
         for option in self.options:
             if option.index == right_slot:
                 option.set_state("correct")

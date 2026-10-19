@@ -12,6 +12,7 @@ class OpenQuizPage(QWidget):
 
     finished = Signal(float, list)  # score 0..1, [(question dict, answer, Grade)] for answers below the pass mark
     jump_requested = Signal(int)  # time_ms
+    answered = Signal(dict, str, object)  # question, answer, Grade
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -138,6 +139,7 @@ class OpenQuizPage(QWidget):
     def _on_graded(self, result) -> None:
         question = self._current()
         self._results.append((question, self.answer_input.toPlainText().strip(), result))
+        self.answered.emit(question, self._results[-1][1], result)
         self.status.clear()
         self.result.setText(grade_text(result))
         self.result.show()

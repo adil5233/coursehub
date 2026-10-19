@@ -160,6 +160,9 @@ def view(app, monkeypatch):
         def set_step_progress(self, video_id, index, status, answer="", score=None):
             self.progress[(video_id, index)] = (status, answer)
 
+        def add_mistake(self, video_id, question, correct="", my_answer="", time_ms=0, step_index=None):
+            self.mistakes = getattr(self, "mistakes", []) + [(question, correct, time_ms, step_index)]
+
     player = {"playing": True, "seeks": []}
 
     def toggle(_player):

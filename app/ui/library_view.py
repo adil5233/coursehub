@@ -4,7 +4,8 @@ from datetime import date
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QProgressBar, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
 from ..config import display_title, format_ms
@@ -14,6 +15,8 @@ from .thumbnails import cover_pixmap, load_thumb
 
 SOURCE_LABELS = {"local": "Local folder", "drive": "Google Drive", "telegram": "Telegram"}
 CARD_WIDTH = 300
+MISTAKE_ROWS = 5  # rows shown before the mistakes list scrolls
+MISTAKE_ID = Qt.ItemDataRole.UserRole
 GRID_SPACING = 20
 _THUMB_COLORS = [
     ("#3a1c71", "#d76d77"), ("#0f2027", "#2c5364"), ("#41295a", "#2f0743"), ("#1d4350", "#a43931"),
@@ -156,6 +159,7 @@ class LibraryView(QWidget):
     open_course = Signal(int)
     continue_lecture = Signal(int, int)  # course_id, video_id
     revise_lecture = Signal(int, int)
+    mistake_opened = Signal(int)  # mistake id
     add_course = Signal()
     settings_requested = Signal()
     search_requested = Signal()
@@ -200,6 +204,14 @@ class LibraryView(QWidget):
         self.review_row = QHBoxLayout()
         self.review_row.setSpacing(GRID_SPACING)
         self.review_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.mistakes_title = QLabel("Meri galtiyan")
+        self.mistakes_title.setObjectName("SectionTitle")
+        self.mistakes_title.setToolTip("Questions you got wrong; the number is how many times (Baar)")
+        self.mistake_list = QListWidget()
+        self.mistake_list.setObjectName("MistakeList")
+        self.mistake_list.setWordWrap(True)
+        self.mistake_list.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mistake_list.itemClicked.connect(lambda item: self.mistake_opened.emit(item.data(MISTAKE_ID)))
         self.continue_title = QLabel("Continue watching")
         self.continue_title.setObjectName("SectionTitle")
         self.continue_row = QHBoxLayout()
@@ -217,6 +229,9 @@ class LibraryView(QWidget):
         content.setSpacing(12)
         content.addWidget(self.review_title)
         content.addLayout(self.review_row)
+        content.addSpacing(12)
+        content.addWidget(self.mistakes_title)
+        content.addWidget(self.mistake_list)
         content.addSpacing(12)
         content.addWidget(self.continue_title)
         content.addLayout(self.continue_row)
@@ -272,13 +287,31 @@ class LibraryView(QWidget):
                                 "Click for a quick revision quiz")
             card.open_requested.connect(self.revise_lecture)
             self._review_cards.append(card)
+        self._fill_mistakes()
         self.empty_label.setVisible(not courses)
         self.review_title.setText(f"Revise today ({len(self._review_cards)})")
         self.review_title.setVisible(bool(self._review_cards))
         self.continue_title.setVisible(bool(self._continue_cards))
-        self.all_title.setVisible(bool(self._continue_cards or self._review_cards))
+        self.all_title.setVisible(bool(self._continue_cards or self._review_cards or self.mistake_list.count()))
         self._columns = 0
         self._relayout()
+
+    def _fill_mistakes(self) -> None:
+        self.mistake_list.clear()
+        mistakes = self.db.mistakes()
+        for mistake in mistakes:
+            mark = "\U0001f6a8 " if mistake["wrong_count"] >= 3 else ""  # 🚨 time for a fresh explanation
+            item = QListWidgetItem(f"{mark}Baar {mistake['wrong_count']}  •  {mistake['question']}\n"
+                                   f"{mistake['course_name']}  •  {display_title(mistake['video_title'])}")
+            item.setData(MISTAKE_ID, mistake["id"])
+            item.setToolTip("Click: right answer, a fresh explanation, or jump to the lecture")
+            self.mistake_list.addItem(item)
+        self.mistakes_title.setText(f"Meri galtiyan ({len(mistakes)})")
+        self.mistakes_title.setVisible(bool(mistakes))
+        self.mistake_list.setVisible(bool(mistakes))
+        if mistakes:
+            row = self.mistake_list.sizeHintForRow(0) + 4
+            self.mistake_list.setFixedHeight(min(len(mistakes), MISTAKE_ROWS) * row + 6)
 
     def _relayout(self) -> None:
         available = self.scroll.viewport().width()
