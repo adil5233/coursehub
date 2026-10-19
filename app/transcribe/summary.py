@@ -107,22 +107,34 @@ def timed_parts(segments: list[Segment], max_chars: int = PART_CHARS) -> list[tu
 
 def ask(api_key: str, prompt: str, max_tokens: int, report, cancel: threading.Event,
         system: str = SYSTEM_PROMPT) -> str:
-    """One Groq chat call that waits out the free per-minute limits and retries network errors."""
+    """One Groq chat call. A model that hits its free limit (or was removed) hands over to the next one;
+    only when every model is limited does it wait (short limits) or fail (daily limits). Network errors retry."""
     messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
     failures = 0
     while True:
         if cancel.is_set():
             raise Cancelled()
-        try:
-            return groq_client.chat(api_key, messages, max_tokens=max_tokens)
-        except groq_client.RateLimited as exc:
-            if exc.retry_after > MAX_WAIT_S:
-                minutes = math.ceil(exc.retry_after / 60)
-                raise groq_client.GroqError(
-                    f"Groq's free limit for today is used up. Try again in about {minutes} min.") from None
-            report(f"Waiting {math.ceil(exc.retry_after)} s for the Groq free limit...")
-            if cancel.wait(max(1.0, exc.retry_after)):
+        model, wait = groq_client.pick_model()
+        if model is None:
+            if wait == float("inf"):
+                raise groq_client.GroqError("No Groq chat model is available for this API key.")
+            if wait > MAX_WAIT_S:
+                raise groq_client.GroqError(f"Groq's free limit for today is used up on every model. "
+                                            f"Try again in about {math.ceil(wait / 60)} min.")
+            report(f"Waiting {math.ceil(wait)} s for the Groq free limit...")
+            if cancel.wait(max(1.0, wait)):
                 raise Cancelled() from None
+            continue
+        try:
+            return groq_client.chat(api_key, messages, max_tokens=max_tokens, model=model)
+        except groq_client.RateLimited as exc:
+            groq_client.cool_down(model, exc.retry_after)
+            following, _wait = groq_client.pick_model()
+            if following is not None:
+                report(f"{groq_client.short_name(model)} hit its free limit, switching to "
+                       f"{groq_client.short_name(following)}...")
+        except groq_client.ModelUnavailable:
+            groq_client.mark_gone(model)
         except requests.RequestException:
             failures += 1
             if failures > NETWORK_RETRIES:

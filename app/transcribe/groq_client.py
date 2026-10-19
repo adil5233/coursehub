@@ -1,7 +1,9 @@
 """Groq's hosted Whisper and chat models (OpenAI-compatible API) plus the user's Groq settings."""
 import json
 import mimetypes
+import re
 import threading
+import time
 from datetime import date
 
 import requests
@@ -15,7 +17,17 @@ LANGUAGE = "en"
 # Whisper follows the prompt's style: Hinglish speech comes out as Indian English in Roman script.
 PROMPT = "A programming lecture in Hinglish (Hindi and English mixed), transcribed in Indian English, Roman script."
 _SETTINGS_LOCK = threading.RLock()  # the transcript thread adds usage while Settings may save the key
-CHAT_MODEL = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile is no longer offered on Groq
+# Free limits are per model, so when one runs out the next takes over (best first).
+CHAT_MODELS = (
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
+    "llama-3.1-8b-instant",
+)
+CHAT_MODEL = CHAT_MODELS[0]
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL)  # reasoning some models put in the reply itself
+_GONE_HINTS = ("decommissioned", "does not exist", "not found", "not supported", "no longer")
 
 
 class GroqError(Exception):
@@ -24,6 +36,10 @@ class GroqError(Exception):
 
 class InvalidKey(GroqError):
     pass
+
+
+class ModelUnavailable(GroqError):
+    """The model was removed from Groq or is not available for this key."""
 
 
 class RateLimited(GroqError):
@@ -49,7 +65,11 @@ def _raise_for_status(resp: requests.Response) -> None:
             retry_after = 60.0
         raise RateLimited(retry_after, _error_message(resp))
     if resp.status_code >= 400:
-        raise GroqError(f"Groq error {resp.status_code}: {_error_message(resp)}")
+        message = _error_message(resp)
+        if resp.status_code == 404 or (resp.status_code == 400 and "model" in message.lower()
+                                       and any(hint in message.lower() for hint in _GONE_HINTS)):
+            raise ModelUnavailable(message)
+        raise GroqError(f"Groq error {resp.status_code}: {message}")
 
 
 def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout: float = 300) -> list[Segment]:
@@ -82,9 +102,9 @@ def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout:
 
 
 def chat(api_key: str, messages: list[dict], max_tokens: int = 1500, temperature: float = 0.3,
-         timeout: float = 120) -> str:
-    body = {"model": CHAT_MODEL, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
-    if CHAT_MODEL.startswith("openai/gpt-oss"):
+         timeout: float = 120, model: str = CHAT_MODEL) -> str:
+    body = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
+    if model.startswith("openai/gpt-oss"):
         body["reasoning_effort"] = "low"  # its hidden thinking also counts against the free token limits
     resp = requests.post(
         f"{API_URL}/chat/completions",
@@ -94,9 +114,48 @@ def chat(api_key: str, messages: list[dict], max_tokens: int = 1500, temperature
     )
     _raise_for_status(resp)
     try:
-        return str(resp.json()["choices"][0]["message"]["content"]).strip()
+        content = str(resp.json()["choices"][0]["message"]["content"])
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise GroqError("Groq sent an unexpected reply.") from exc
+    return _THINK.sub("", content).strip()
+
+
+# ---- which model to use: skip the ones whose free limit ran out or that Groq removed ----
+_models_lock = threading.Lock()
+_cooldown: dict[str, float] = {}  # model -> time.monotonic() when its limit resets
+_gone: set[str] = set()
+
+
+def pick_model(models: tuple[str, ...] = CHAT_MODELS) -> tuple[str | None, float]:
+    """(first model that can be used now, 0) or (None, seconds until the first one is free again)."""
+    now = time.monotonic()
+    with _models_lock:
+        usable = [m for m in models if m not in _gone]
+        for model in usable:
+            if _cooldown.get(model, 0) <= now:
+                return model, 0.0
+        waits = [_cooldown[m] - now for m in usable]
+    return None, (min(waits) if waits else float("inf"))
+
+
+def cool_down(model: str, seconds: float) -> None:
+    with _models_lock:
+        _cooldown[model] = time.monotonic() + max(1.0, seconds)
+
+
+def mark_gone(model: str) -> None:
+    with _models_lock:
+        _gone.add(model)
+
+
+def reset_models() -> None:
+    with _models_lock:
+        _cooldown.clear()
+        _gone.clear()
+
+
+def short_name(model: str) -> str:
+    return model.rsplit("/", 1)[-1]
 
 def check_key(api_key: str) -> None:
     """Raises InvalidKey / GroqError when the key cannot be used."""
