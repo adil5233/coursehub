@@ -1,4 +1,4 @@
-"""Groq's hosted Whisper (OpenAI-compatible audio API) plus the user's Groq settings."""
+"""Groq's hosted Whisper and chat models (OpenAI-compatible API) plus the user's Groq settings."""
 import json
 from datetime import date
 
@@ -12,6 +12,7 @@ MODEL = "whisper-large-v3"
 LANGUAGE = "en"
 # Whisper follows the prompt's style: Hinglish speech comes out as Indian English in Roman script.
 PROMPT = "A programming lecture in Hinglish (Hindi and English mixed), transcribed in Indian English, Roman script."
+CHAT_MODEL = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile is no longer offered on Groq
 
 
 class GroqError(Exception):
@@ -35,6 +36,19 @@ def _error_message(resp: requests.Response) -> str:
         return resp.text[:300] or f"HTTP {resp.status_code}"
 
 
+def _raise_for_status(resp: requests.Response) -> None:
+    if resp.status_code == 401:
+        raise InvalidKey("Groq rejected the API key.")
+    if resp.status_code == 429:
+        try:
+            retry_after = float(resp.headers.get("retry-after", "60"))
+        except ValueError:
+            retry_after = 60.0
+        raise RateLimited(retry_after, _error_message(resp))
+    if resp.status_code >= 400:
+        raise GroqError(f"Groq error {resp.status_code}: {_error_message(resp)}")
+
+
 def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout: float = 300) -> list[Segment]:
     resp = requests.post(
         f"{API_URL}/audio/transcriptions",
@@ -51,16 +65,7 @@ def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout:
         ],
         timeout=timeout,
     )
-    if resp.status_code == 401:
-        raise InvalidKey("Groq rejected the API key.")
-    if resp.status_code == 429:
-        try:
-            retry_after = float(resp.headers.get("retry-after", "60"))
-        except ValueError:
-            retry_after = 60.0
-        raise RateLimited(retry_after, _error_message(resp))
-    if resp.status_code >= 400:
-        raise GroqError(f"Groq error {resp.status_code}: {_error_message(resp)}")
+    _raise_for_status(resp)
     payload = resp.json()
     segments = [
         Segment(float(s["start"]), float(s["end"]), str(s.get("text", "")).strip())
@@ -72,6 +77,23 @@ def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout:
     ]
     return split_segments(segments, words)
 
+
+def chat(api_key: str, messages: list[dict], max_tokens: int = 1500, temperature: float = 0.3,
+         timeout: float = 120) -> str:
+    body = {"model": CHAT_MODEL, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
+    if CHAT_MODEL.startswith("openai/gpt-oss"):
+        body["reasoning_effort"] = "low"  # its hidden thinking also counts against the free token limits
+    resp = requests.post(
+        f"{API_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json=body,
+        timeout=timeout,
+    )
+    _raise_for_status(resp)
+    try:
+        return str(resp.json()["choices"][0]["message"]["content"]).strip()
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise GroqError("Groq sent an unexpected reply.") from exc
 
 def check_key(api_key: str) -> None:
     """Raises InvalidKey / GroqError when the key cannot be used."""

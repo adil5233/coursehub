@@ -11,6 +11,7 @@ from ..config import (
 from ..models import Course, Video
 from ..player.vlc_widget import SEEK_STEP_MS, VOLUME_STEP, VideoPlayer, glyph_icon
 from ..transcribe import groq_client, has_transcript, load_transcript, srt_path
+from ..transcribe.summary import NoteSummarizer
 from .notes_panel import NotesPanel
 from .remote import ensure_source, scan_source
 from .theme import ACCENT
@@ -202,7 +203,7 @@ class CourseView(QWidget):
         video_layout.addStretch(1)
         self._video_layout = video_layout
 
-        self.notes = NotesPanel(db, self.player.time)
+        self.notes = NotesPanel(db, self.player.time, NoteSummarizer(self))
         self.notes.seek_requested.connect(self.player.seek)
         self.notes.hide_requested.connect(lambda: self.set_notes_visible(False))
         self.notes.content_height_changed.connect(self._fit_notes)
@@ -490,6 +491,7 @@ class CourseView(QWidget):
         self.save_progress()
         self.db.set_state("speed", str(self.player.rate()))
         self.db.set_state("volume", str(self.player.volume()))
+        self.notes.summarizer.shutdown()
         self.player.release()
 
     def sync_course(self) -> None:

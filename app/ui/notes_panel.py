@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import format_ms
+from ..transcribe import groq_client, load_transcript
 
 INPUT_MAX_LINES = 6
 FENCE = "```"
@@ -238,11 +239,12 @@ class NotesPanel(QFrame):
     hide_requested = Signal()
     content_height_changed = Signal()  # preferred_height() changed: the parent may resize the panel
 
-    def __init__(self, db, time_provider, parent=None) -> None:
+    def __init__(self, db, time_provider, summarizer=None, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("NotesPanel")
         self.db = db
         self._time = time_provider
+        self.summarizer = summarizer
         self.video_id: int | None = None
         self._has_notes = False
         self._last_width = 0
@@ -259,11 +261,25 @@ class NotesPanel(QFrame):
         hide_button.setObjectName("Ghost")
         hide_button.setToolTip("Hide notes")
         hide_button.clicked.connect(self.hide_requested)
+        self.ai_status = QLabel()
+        self.ai_status.setObjectName("Muted")
+        self.ai_button = QPushButton("AI summary")
+        self.ai_button.setToolTip("Write a summary note of this lecture from its transcript (Groq, free)")
+        self.ai_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ai_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.ai_button.clicked.connect(self._generate_summary)
+        self.ai_button.setVisible(summarizer is not None)
         header = QHBoxLayout()
         header.addWidget(title)
         header.addWidget(self.count_label)
         header.addStretch(1)
+        header.addWidget(self.ai_status)
+        header.addWidget(self.ai_button)
         header.addWidget(hide_button)
+        if summarizer is not None:
+            summarizer.progress.connect(self._on_summary_progress)
+            summarizer.finished.connect(self._on_summary_finished)
+            summarizer.failed.connect(self._on_summary_failed)
 
         self.input = _NoteInput()
         self.input.setPlaceholderText("Write a note at the current time... (Enter to add, Shift+Enter for a new line, "
@@ -331,6 +347,59 @@ class NotesPanel(QFrame):
         self.video_id = video_id
         self.setEnabled(video_id is not None)
         self._reload()
+        self._sync_ai()
+
+    # ---- AI summary ----
+    def _sync_ai(self, status: str | None = None) -> None:
+        if self.summarizer is None:
+            return
+        busy = self.summarizer.busy_video()
+        mine = busy is not None and busy == self.video_id
+        self.ai_button.setEnabled(self.video_id is not None and busy is None)
+        self.ai_button.setText("Summarizing..." if mine else "AI summary")
+        if status is not None:
+            self.ai_status.setText(status)
+        elif mine:
+            self.ai_status.setText(self.summarizer.status)
+        else:
+            self.ai_status.clear()
+
+    def _generate_summary(self) -> None:
+        if self.summarizer is None or self.video_id is None:
+            return
+        segments = load_transcript(self.video_id)
+        if not segments:
+            QMessageBox.information(
+                self, "Transcript needed",
+                "The AI summary is written from the lecture's transcript.\n\n"
+                "Make the transcript first: Transcript tab \u2192 Generate transcript.")
+            return
+        if not groq_client.load_settings()["api_key"]:
+            QMessageBox.information(
+                self, "Groq API key needed",
+                "AI summaries use Groq's free API.\n\nCreate a free key at console.groq.com/keys, "
+                "then paste it in Settings \u2192 Transcripts.")
+            return
+        self.summarizer.start(self.video_id, segments)
+        self._sync_ai()
+
+    def _on_summary_progress(self, video_id: int, text: str) -> None:
+        if video_id == self.video_id:
+            self.ai_status.setText(text)
+
+    def _on_summary_finished(self, video_id: int, text: str) -> None:
+        note_id = self.db.add_note(video_id, 0, text)  # main thread: the sqlite connection lives here
+        if video_id == self.video_id:
+            self._reload(scroll_to=note_id)
+            self._sync_ai("Summary added \u2713")
+        else:
+            self._sync_ai()
+
+    def _on_summary_failed(self, video_id: int, message: str) -> None:
+        self._sync_ai()
+        if video_id == self.video_id:
+            self.ai_status.clear()
+            QMessageBox.warning(self, "AI summary", message)
 
     def cards(self) -> list[NoteCard]:
         return [self._cards_layout.itemAt(i).widget() for i in range(self._cards_layout.count() - 1)]
