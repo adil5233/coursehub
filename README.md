@@ -31,9 +31,26 @@ A Udemy-style desktop app for Windows to watch video courses from your **local P
     Seeking cancels read-ahead that is no longer needed.
   - The start of the next lecture is downloaded in the background, so it starts almost instantly.
 
+## Study features
+
+These need a free [Groq API key](https://console.groq.com/keys) (Settings → Transcripts) and the lecture's transcript.
+
+| Feature | What it does |
+| --- | --- |
+| Transcript | Groq Whisper subtitles and a searchable transcript; click a line to jump there |
+| AI chapters | YouTube-style chapters on the seek bar |
+| **Steps + Study mode** | The lecture cut into 3-5 minute steps, each with a one-line gist, up to 2 new words and a check question. In study mode the video pauses after every step: answer first, then see the answer and mark it (Samajh gaya / Thoda / Nahi → replay the step) |
+| **Answer in your own words** | Type or 🎤 speak an answer; the AI scores it 0-10 and says what was right, what was missing and a better version |
+| Quiz | MCQ, **Apne shabdon me** (own words) and **Interview** (simple English) modes; the score schedules the next revision (Revise today) |
+| **Meri galtiyan** | Every wrong answer is logged with how many times it went wrong (Baar). From Baar 3 the AI explains it in a fresh way; save that as a note or jump to that moment |
+| Ask | Questions about the lecture or the whole course, with clickable sources. **Abhi wala samjhao** explains the last ~90 seconds simply. Typing pauses the video; doubts are kept per lecture |
+| AI revision note | QUESTIONS / ANSWERS / MERI GALTI / EK LINE ME + a mantra |
+| Export | All notes as one Markdown file, or revision notes as one `review.py`-style file per lecture (course right-click menu) |
+| Search | Every note and transcript in the library (Ctrl+K) |
+
 ## Requirements
 
-- Windows 10/11
+- Windows 10/11 (Linux works too, see below)
 - Python 3.11+ (developed on 3.14)
 - [VLC media player](https://www.videolan.org/vlc/) **64-bit**, installed (the app uses `libvlc.dll`)
 
@@ -46,6 +63,10 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe main.py
 ```
+
+On Linux: `sudo apt install vlc`, then `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` and
+`QT_QPA_PLATFORM=xcb .venv/bin/python main.py` (`xcb` lets VLC draw inside the window under Wayland). Data goes to
+`~/CourseHub`.
 
 ## Adding a course
 
@@ -99,7 +120,9 @@ app/
   telegram/             Telethon client and chunk cache
   player/vlc_widget.py  VLC player, overlay controls, seek bar, Up next card
   player/preview.py     seek bar hover previews
-  ui/                   library, course view, dialogs, theme, thumbnails
+  transcribe/           Whisper transcripts, chapters, steps, quiz, grading, Ask, summary (Groq)
+  notes_export.py       Markdown and review.py-style exports
+  ui/                   library, course view, panels (steps, ask, notes), dialogs, theme
 tests/                  pytest tests
 ```
 
