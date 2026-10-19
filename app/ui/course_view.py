@@ -13,6 +13,7 @@ from ..player.vlc_widget import SEEK_STEP_MS, VOLUME_STEP, VideoPlayer, glyph_ic
 from ..review import FIRST_INTERVAL, due_after
 from ..transcribe import groq_client, has_transcript, load_transcript, srt_path
 from ..transcribe.chapters import ChapterMaker, load_chapters
+from ..transcribe.grade import context_for
 from ..transcribe.steps import StepMaker, load_steps, step_index_at
 from ..transcribe.summary import NoteSummarizer
 from .ask_panel import AskPanel
@@ -304,6 +305,7 @@ class CourseView(QWidget):
         self.steps.marked.connect(self._on_step_marked)
         self.steps.replay_requested.connect(self._replay_step)
         self.steps.checkpoint_closed.connect(self._on_checkpoint_closed)
+        self.steps.context_provider = self._step_context
         self.step_maker = StepMaker(self)
         self.step_maker.progress.connect(self._on_steps_progress)
         self.step_maker.finished.connect(self._on_steps_ready)
@@ -573,9 +575,16 @@ class CourseView(QWidget):
         if not self.player.is_playing():
             self.player.toggle_play()
 
-    def _on_step_marked(self, index: int, status: str, answer: str) -> None:
+    def _on_step_marked(self, index: int, status: str, answer: str, score) -> None:
         if self.current is not None:
-            self.db.set_step_progress(self.current.id, index, status, answer)
+            self.db.set_step_progress(self.current.id, index, status, answer, score)
+
+    def _step_context(self, index: int) -> str:
+        steps = self.steps.steps
+        if self.current is None or not 0 <= index < len(steps):
+            return ""
+        end = steps[index + 1]["start_ms"] if index + 1 < len(steps) else float("inf")
+        return context_for(load_transcript(self.current.id), steps[index]["start_ms"], end)
 
     def open_quiz(self, video: Video) -> None:
         if self.course is None:

@@ -55,6 +55,11 @@ CREATE TABLE IF NOT EXISTS reviews (
     last_score REAL,
     attempts INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS open_quizzes (
+    video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS step_progress (
     video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
     step_index INTEGER NOT NULL,
@@ -307,6 +312,19 @@ class Database:
                 "INSERT INTO quizzes (video_id, questions) VALUES (?, ?) ON CONFLICT(video_id) DO UPDATE SET "
                 "questions = excluded.questions, created_at = CURRENT_TIMESTAMP",
                 (video_id, json.dumps(questions, ensure_ascii=False)),
+            )
+
+    def get_open_quiz(self, video_id: int) -> dict | None:
+        """{"open": [...], "interview": [...]} own-words and interview questions."""
+        row = self.conn.execute("SELECT data FROM open_quizzes WHERE video_id = ?", (video_id,)).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def save_open_quiz(self, video_id: int, data: dict) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO open_quizzes (video_id, data) VALUES (?, ?) ON CONFLICT(video_id) DO UPDATE SET "
+                "data = excluded.data, created_at = CURRENT_TIMESTAMP",
+                (video_id, json.dumps(data, ensure_ascii=False)),
             )
 
     def get_review(self, video_id: int) -> dict | None:

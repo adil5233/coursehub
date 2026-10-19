@@ -4,23 +4,42 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import format_ms
+from ..transcribe.grade import BackgroundCall, grade
+from .recorder import VoiceAnswerButton
 
 STEP_INDEX = Qt.ItemDataRole.UserRole
 STATUS_MARK = {"done": "✅", "partial": "\U0001f7e1", "again": "\U0001f501"}  # ✅ 🟡 🔁
 TODO_MARK = "⬜"  # ⬜
 
 
+def suggested_status(score: int) -> str:
+    return "done" if score >= 8 else "partial" if score >= 5 else "again"
+
+
+def grade_text(result) -> str:
+    lines = [f"Score: {result.score}/10"]
+    if result.sahi:
+        lines.append(f"✅ Sahi: {result.sahi}")
+    if result.chhoota:
+        lines.append(f"⚠️ Chhoota: {result.chhoota}")
+    if result.better:
+        lines.append(f"Behtar: {result.better}")
+    return "\n".join(lines)
+
+
 class CheckpointCard(QFrame):
     """One step's check: gist, new words, a question to answer first, then the answer and a self-mark."""
 
-    marked = Signal(int, str, str)  # step index, status, the learner's answer
+    marked = Signal(int, str, str, object)  # step index, status, the learner's answer, AI score or None
     replay_requested = Signal(int)  # step index
+    grade_requested = Signal(int, str)  # step index, answer
     closed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("Checkpoint")
         self.step_index = -1
+        self.score: int | None = None
         self.kicker = QLabel()
         self.kicker.setObjectName("CheckpointKicker")
         self.title = QLabel()
@@ -36,11 +55,32 @@ class CheckpointCard(QFrame):
         self.question.setWordWrap(True)
         self.answer_input = QPlainTextEdit()
         self.answer_input.setObjectName("NoteInput")
-        self.answer_input.setPlaceholderText("Pehle khud likho, phir answer dekho...")
+        self.answer_input.setPlaceholderText("Pehle khud likho ya \U0001f3a4 bolo, phir answer dekho...")
         self.answer_input.setFixedHeight(72)
+        self.voice_button = VoiceAnswerButton()
+        self.voice_button.text_ready.connect(self._append_spoken)
+        self.voice_button.failed.connect(self.show_status)
+        self.grade_button = QPushButton("Grade karo")
+        self.grade_button.setToolTip("AI checks your answer against the lecture: score, what was right / missing")
+        self.grade_button.clicked.connect(self._request_grade)
         self.reveal_button = QPushButton("Answer dekho")
         self.reveal_button.setObjectName("Primary")
         self.reveal_button.clicked.connect(self.reveal)
+        answer_row = QHBoxLayout()
+        answer_row.setContentsMargins(0, 0, 0, 0)
+        answer_row.addWidget(self.voice_button)
+        answer_row.addStretch(1)
+        answer_row.addWidget(self.grade_button)
+        answer_row.addWidget(self.reveal_button)
+        self.answer_actions = QWidget()
+        self.answer_actions.setLayout(answer_row)
+        self.status = QLabel()
+        self.status.setObjectName("Muted")
+        self.status.setWordWrap(True)
+        self.grade_label = QLabel()
+        self.grade_label.setObjectName("CheckpointGrade")
+        self.grade_label.setWordWrap(True)
+        self.grade_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.answer = QLabel()
         self.answer.setObjectName("CheckpointAnswer")
         self.answer.setWordWrap(True)
@@ -73,7 +113,7 @@ class CheckpointCard(QFrame):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
         for widget in (self.kicker, self.title, self.gist, self.words, self.question, self.answer_input,
-                       self.reveal_button, self.answer, self.marks_row):
+                       self.answer_actions, self.status, self.grade_label, self.answer, self.marks_row):
             layout.addWidget(widget)
         layout.addLayout(bottom)
 
@@ -94,7 +134,14 @@ class CheckpointCard(QFrame):
         self.question.setVisible(check is not None)
         self.answer_input.setVisible(check is not None)
         self.answer_input.clear()
-        self.reveal_button.setVisible(check is not None)
+        self.answer_actions.setVisible(check is not None)
+        self.reveal_button.show()
+        self.grade_button.show()
+        self.grade_button.setEnabled(True)
+        self.score = None
+        self.status.hide()
+        self.grade_label.hide()
+        self._suggest(None)
         self.answer.hide()
         self.marks_row.setVisible(check is None)  # without a question the learner just self-marks
         self.replay_button.hide()
@@ -102,11 +149,48 @@ class CheckpointCard(QFrame):
 
     def reveal(self) -> None:
         self.reveal_button.hide()
+        self.grade_button.hide()
+        self.status.hide()
         self.answer.show()
         self.marks_row.show()
 
+    def show_status(self, text: str) -> None:
+        self.status.setText(text)
+        self.status.setVisible(bool(text))
+
+    def _append_spoken(self, text: str) -> None:
+        current = self.answer_input.toPlainText().rstrip()
+        self.answer_input.setPlainText(f"{current} {text}".strip())
+        self.show_status("")
+
+    def _request_grade(self) -> None:
+        answer = self.answer_input.toPlainText().strip()
+        if not answer:
+            self.show_status("Pehle apna jawab likho ya bolo, phir grade karwao.")
+            return
+        self.grade_button.setEnabled(False)
+        self.show_status("Checking your answer...")
+        self.grade_requested.emit(self.step_index, answer)
+
+    def show_grade(self, result) -> None:
+        self.score = result.score
+        self.grade_label.setText(grade_text(result))
+        self.grade_label.show()
+        self.reveal()
+        self._suggest(suggested_status(result.score))
+
+    def grade_failed(self, message: str) -> None:
+        self.grade_button.setEnabled(True)
+        self.show_status(message)
+
+    def _suggest(self, status: str | None) -> None:
+        for name, button in self.mark_buttons.items():
+            button.setObjectName("Primary" if name == status else "")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
     def _mark(self, status: str) -> None:
-        self.marked.emit(self.step_index, status, self.answer_input.toPlainText().strip())
+        self.marked.emit(self.step_index, status, self.answer_input.toPlainText().strip(), self.score)
         self.replay_button.setVisible(status == "again")
         if status != "again":
             self.closed.emit()
@@ -117,7 +201,7 @@ class StepsPanel(QFrame):
 
     seek_requested = Signal(int)
     make_requested = Signal()
-    marked = Signal(int, str, str)  # step index, status, answer
+    marked = Signal(int, str, str, object)  # step index, status, answer, AI score or None
     replay_requested = Signal(int)  # step index
     checkpoint_closed = Signal()
 
@@ -126,6 +210,12 @@ class StepsPanel(QFrame):
         self.setObjectName("StepsPanel")
         self.steps: list[dict] = []
         self.progress: dict[int, str] = {}
+        self.context_provider = lambda _index: ""  # lecture text of a step, for grading
+        self._grading: int | None = None  # step whose answer is being checked
+        self.grader = BackgroundCall(self)
+        self.grader.progress.connect(lambda text: self.card.show_status(text))
+        self.grader.finished.connect(self._on_graded)
+        self.grader.failed.connect(lambda message: self.card.grade_failed(message))
 
         self.status = QLabel()
         self.status.setObjectName("Muted")
@@ -147,6 +237,7 @@ class StepsPanel(QFrame):
         self.card = CheckpointCard()
         self.card.marked.connect(self._on_marked)
         self.card.replay_requested.connect(self.replay_requested)
+        self.card.grade_requested.connect(self._grade)
         self.card.closed.connect(self.close_checkpoint)
         self.card.hide()
 
@@ -211,9 +302,21 @@ class StepsPanel(QFrame):
         if 0 <= index < len(self.steps):
             self.seek_requested.emit(self.steps[index]["start_ms"])
 
-    def _on_marked(self, index: int, status: str, answer: str) -> None:
+    def _grade(self, index: int, answer: str) -> None:
+        check = self.steps[index].get("check") if 0 <= index < len(self.steps) else None
+        if check is None:
+            return
+        self._grading = index
+        if not self.grader.start(grade, check["q"], check.get("a", ""), answer, self.context_provider(index)):
+            self.card.grade_failed("Still checking the last answer...")
+
+    def _on_graded(self, result) -> None:
+        if self.card.step_index == self._grading and self.checkpoint_open():
+            self.card.show_grade(result)
+
+    def _on_marked(self, index: int, status: str, answer: str, score) -> None:
         self.progress[index] = status
         self._fill()
         self.highlight(index)
         self.set_busy(None)
-        self.marked.emit(index, status, answer)
+        self.marked.emit(index, status, answer, score)

@@ -54,6 +54,7 @@ QFrame#Checkpoint QLabel {{ background: transparent; }}
 QLabel#CheckpointKicker {{ color: #3ea6ff; font-size: 11px; font-weight: 800; }}
 QLabel#CheckpointQuestion {{ font-size: 14px; font-weight: 600; }}
 QLabel#CheckpointAnswer {{ color: #7ee787; }}
+QLabel#CheckpointGrade {{ background: rgba(62, 166, 255, 0.10); border-radius: 8px; padding: 6px 8px; }}
 QLabel#Mantra {{ color: #ffd166; font-weight: 600; }}
 QPlainTextEdit#NoteInput {{ background: {BG}; border: 1px solid #303030; border-radius: 8px; padding: 2px 4px; }}
 QPlainTextEdit#NoteInput:focus {{ border: 1px solid #3ea6ff; }}

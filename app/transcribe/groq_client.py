@@ -1,5 +1,6 @@
 """Groq's hosted Whisper and chat models (OpenAI-compatible API) plus the user's Groq settings."""
 import json
+import mimetypes
 import threading
 from datetime import date
 
@@ -55,7 +56,7 @@ def transcribe(api_key: str, audio: bytes, filename: str = "audio.mp3", timeout:
     resp = requests.post(
         f"{API_URL}/audio/transcriptions",
         headers={"Authorization": f"Bearer {api_key}"},
-        files={"file": (filename, audio, "audio/mpeg")},
+        files={"file": (filename, audio, mimetypes.guess_type(filename)[0] or "audio/mpeg")},
         data=[
             ("model", MODEL),
             ("language", LANGUAGE),

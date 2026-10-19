@@ -130,7 +130,7 @@ def test_steps_panel_list_and_checkpoint(app):
     card.reveal()
     assert not card.answer.isHidden() and card.answer.text() == "Answer: 6"
     card.mark_buttons["again"].click()
-    assert marks == [(1, "again", "6 aayega")] and panel.checkpoint_open() and not card.replay_button.isHidden()
+    assert marks == [(1, "again", "6 aayega", None)] and panel.checkpoint_open() and not card.replay_button.isHidden()
     card.replay_button.click()
     assert replays == [1]
     card.mark_buttons["done"].click()
@@ -157,7 +157,7 @@ def view(app, monkeypatch):
         def set_state(self, key, value):
             self.state[key] = value
 
-        def set_step_progress(self, video_id, index, status, answer=""):
+        def set_step_progress(self, video_id, index, status, answer="", score=None):
             self.progress[(video_id, index)] = (status, answer)
 
     player = {"playing": True, "seeks": []}

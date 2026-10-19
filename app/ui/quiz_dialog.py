@@ -3,13 +3,20 @@ from datetime import date
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QButtonGroup, QDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 from ..config import display_title, format_ms
 from ..review import due_after, next_interval
 from ..transcribe import groq_client, load_transcript
-from ..transcribe.quiz import QuizMaker
+from ..transcribe.grade import BackgroundCall, context_for
+from ..transcribe.quiz import QuizMaker, _spread, make_open_questions
+from ..transcribe.steps import load_steps
+from .open_quiz import OpenQuizPage
+
+MODES = (("mcq", "MCQ"), ("open", "Apne shabdon me"), ("interview", "Interview"))
+OPEN_FROM_STEPS = 5  # own-words questions taken from the study steps' checks
 
 
 class _Option(QFrame):
@@ -57,23 +64,47 @@ class QuizDialog(QDialog):
         self._chosen: int | None = None
         self._correct = 0
         self._wrong: list[dict] = []
+        self._mode = "mcq"
+        self._open_maker: BackgroundCall | None = None
 
         title = QLabel(display_title(video.title))
         title.setObjectName("SectionTitle")
         title.setWordWrap(True)
         subtitle = QLabel(course.name)
         subtitle.setObjectName("Muted")
+        self.mode_buttons = QButtonGroup(self)
+        modes = QHBoxLayout()
+        modes.setSpacing(8)
+        for index, (key, label) in enumerate(MODES):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setToolTip({"mcq": "Pick the right option",
+                               "open": "Answer in your own words (type or speak); the AI checks it",
+                               "interview": "Interview questions: answer in simple English, the AI checks it"}[key])
+            self.mode_buttons.addButton(button, index)
+            modes.addWidget(button)
+        modes.addStretch(1)
+        self.mode_buttons.button(0).setChecked(True)
+        self.mode_buttons.idClicked.connect(lambda index: self.set_mode(MODES[index][0]))
+        self.open_page = OpenQuizPage()
+        self.open_page.context_provider = self._context_at
+        self.open_page.finished.connect(self._finish_open)
+        self.open_page.jump_requested.connect(
+            lambda ms: (self.jump_requested.emit(self.course.id, self.video.id, ms), self.accept()))
         self.pages = QStackedWidget()
         self.pages.addWidget(self._loading_page())
         self.pages.addWidget(self._question_page())
         self.pages.addWidget(self._result_page())
+        self.pages.addWidget(self.open_page)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(6)
         layout.addWidget(title)
         layout.addWidget(subtitle)
-        layout.addSpacing(8)
+        layout.addSpacing(6)
+        layout.addLayout(modes)
+        layout.addSpacing(6)
         layout.addWidget(self.pages, 1)
         self._load()
 
@@ -141,10 +172,10 @@ class QuizDialog(QDialog):
         self.wrong_label.setTextFormat(Qt.TextFormat.PlainText)
         again = QPushButton("Try again")
         again.setToolTip("Same questions in a new order")
-        again.clicked.connect(self._start)
+        again.clicked.connect(lambda: self.set_mode(self._mode))
         fresh = QPushButton("New questions")
         fresh.setToolTip("Ask Groq for a fresh set of questions")
-        fresh.clicked.connect(lambda: self._generate())
+        fresh.clicked.connect(self._fresh)
         done = QPushButton("Done")
         done.setObjectName("Primary")
         done.clicked.connect(self.accept)
@@ -168,6 +199,75 @@ class QuizDialog(QDialog):
         self.loading_label.setText(text)
         self.loading_bar.setVisible(busy)
         self.pages.setCurrentIndex(0)
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode
+        self.mode_buttons.button([key for key, _label in MODES].index(mode)).setChecked(True)
+        if mode == "mcq":
+            self._load()
+        else:
+            self._load_open(mode)
+
+    def _fresh(self) -> None:
+        if self._mode == "mcq":
+            self._generate()
+        else:
+            self._generate_open(self._mode)
+
+    def _context_at(self, time_ms: int) -> str:
+        return context_for(load_transcript(self.video.id), time_ms)
+
+    def _open_questions(self, mode: str) -> list[dict]:
+        if mode == "open":
+            checks = [dict(step["check"], time_ms=step["start_ms"])
+                      for step in load_steps(self.video.id)["steps"] if step.get("check")]
+            if checks:
+                return _spread(checks, OPEN_FROM_STEPS)
+        return list((self.db.get_open_quiz(self.video.id) or {}).get(mode) or [])
+
+    def _load_open(self, mode: str) -> None:
+        questions = self._open_questions(mode)
+        if questions:
+            self.open_page.start(questions, interview=mode == "interview")
+            self.pages.setCurrentIndex(3)
+        else:
+            self._generate_open(mode)
+
+    def _generate_open(self, mode: str) -> None:
+        segments = load_transcript(self.video.id)
+        if not segments:
+            self._show_message("These questions are made from the lecture's transcript.\n\n"
+                               "Make the transcript first: Transcript tab \u2192 Generate transcript.")
+            return
+        if not groq_client.load_settings()["api_key"]:
+            self._show_message("Quizzes use Groq's free API. Paste your key in Settings \u2192 Transcripts.")
+            return
+        self._show_message("Writing questions from the transcript...", busy=True)
+        if self._open_maker is None:
+            self._open_maker = BackgroundCall(self)
+            self._open_maker.progress.connect(lambda text: self.loading_label.setText(text))
+            self._open_maker.finished.connect(self._on_open_generated)
+            self._open_maker.failed.connect(lambda message: self._show_message(message))
+        self._open_maker.start(make_open_questions, segments)
+
+    def _on_open_generated(self, data: dict) -> None:
+        self.db.save_open_quiz(self.video.id, data)
+        if self._mode != "mcq":
+            questions = list(data.get(self._mode) or [])
+            if self._mode == "open" and not questions:
+                questions = self._open_questions("open")
+            if questions:
+                self.open_page.start(questions, interview=self._mode == "interview")
+                self.pages.setCurrentIndex(3)
+            else:
+                self._show_message("Groq did not return questions of this kind. Try \"New questions\".")
+
+    def _finish_open(self, score: float, weak: list) -> None:
+        count = len(self.open_page.questions)
+        lines = [f"\u2022 {question['q']}\n   \u2192 {result.better or question.get('a', '')}"
+                 for question, _answer, result in weak]
+        wrong = ("Revise these:\n\n" + "\n\n".join(lines)) if lines else "Sab sahi! Bahut badhiya."
+        self._show_result(f"{round(score * 10, 1)} / 10 average  ({count} answers)", score, wrong)
 
     def _load(self) -> None:
         saved = self.db.get_quiz(self.video.id)
@@ -261,19 +361,24 @@ class QuizDialog(QDialog):
     def _finish(self) -> None:
         total = len(self._questions)
         score = self._correct / total if total else 0.0
+        if self._wrong:
+            lines = [f"\u2022 {q['q']}\n   \u2192 {q['options'][q['answer']]}" for q in self._wrong]
+            wrong = "Revise these:\n\n" + "\n\n".join(lines)
+        else:
+            wrong = "Sab sahi! Bahut badhiya."
+        self._show_result(f"{self._correct} / {total} correct  ({round(score * 100)}%)", score, wrong)
+
+    def _show_result(self, score_text: str, score: float, wrong_text: str) -> None:
+        """Any mode's score (0..1) sets when the lecture comes up for revision again."""
         review = self.db.get_review(self.video.id)
         interval = next_interval(review["interval_days"] if review else None, score)
         due = due_after(interval)
         self.db.record_review(self.video.id, score, interval, due)
         days = (due - date.today()).days
-        self.score_label.setText(f"{self._correct} / {total} correct  ({round(score * 100)}%)")
+        self.score_label.setText(score_text)
         self.next_review_label.setText(
             f"Next revision: {due.strftime('%d %b')} (in {days} day{'s' if days != 1 else ''})")
-        if self._wrong:
-            lines = [f"\u2022 {q['q']}\n   \u2192 {q['options'][q['answer']]}" for q in self._wrong]
-            self.wrong_label.setText("Revise these:\n\n" + "\n\n".join(lines))
-        else:
-            self.wrong_label.setText("Sab sahi! Bahut badhiya.")
+        self.wrong_label.setText(wrong_text)
         self.pages.setCurrentIndex(2)
 
     def _watch(self) -> None:
@@ -283,4 +388,7 @@ class QuizDialog(QDialog):
     def done(self, result: int) -> None:
         if self._maker is not None:
             self._maker.cancel()
+        for call in (self._open_maker, self.open_page.grader, self.open_page.voice_button.speech):
+            if call is not None:
+                call.cancel()
         super().done(result)
